@@ -1,10 +1,11 @@
 # bank-collector
 
-**EN (short):** Read your own bank cabinet in a browser you already logged into. Read-only DOM
-extraction over CDP: no login automation, no passwords, no SMS codes, no clicks on "download
-statement", "pay" or "transfer". Data stays local (git-ignored `data/`). Banks are added as YAML
-profiles; today `alfa` is verified against a live cabinet and `example` is a synthetic profile
-used by the tests.
+**EN (short):** Read your own bank cabinet in a browser you already logged into. DOM extraction
+over CDP: no login automation, no passwords, no SMS codes, no clicks on "download statement",
+"pay" or "transfer". The single write action is opt-in (`--enter-code`): it answers the cabinet's
+static "secret code" prompt with a code read from a 0600 file, and nothing else. Data stays local
+(git-ignored `data/`). Banks are added as YAML profiles; today `alfa` is verified against a live
+cabinet and `example` is a synthetic profile used by the tests.
 
 ---
 
@@ -26,8 +27,9 @@ used by the tests.
    отрисованный DOM** по селекторам профиля.
 4. Результат — JSON + CSV в `data/` (в git не попадают).
 
-Скрипт никогда не нажимает кнопки. В коде нет ни одного `click`/`fill`/`submit` — только
-`goto`, ожидание элемента и чтение текста.
+Скрипт не нажимает кнопки кабинета: только `goto`, ожидание элемента и чтение текста. Одно
+исключение — необязательный `--enter-code`, который отвечает на экран постоянного «Секретного
+кода» (см. ниже); он выключен по умолчанию и срабатывает только на распознанном экране.
 
 ## Установка и запуск
 
@@ -63,12 +65,47 @@ bank-collector --bank alfa --cdp-url "ws://<host>:19988/cdp?token=<token>"
 «unverified» значит ровно то, что написано: профиль не проверяли на реальном кабинете, и он,
 скорее всего, не заработает без правки селекторов. Мы не выдаём непроверенное за рабочее.
 
+## Секретный код кабинета (не СМС)
+
+Альфа после долгого отсутствия показывает экран **«Секретный код»** — это постоянный код
+кабинета, который вы знаете, а не СМС и не одноразовый пароль. Его можно не вводить руками:
+
+```bash
+mkdir -p ~/.config/bank-collector && chmod 700 ~/.config/bank-collector
+printf '%s\n' 'ВАШ-КОД' > ~/.config/bank-collector/alfa-code
+chmod 600 ~/.config/bank-collector/alfa-code
+
+bank-collector --bank alfa --cdp-url ... --enter-code
+```
+
+Что важно знать:
+
+- `--enter-code` **выключен по умолчанию**: без флага инструмент ничего не печатает в кабинет.
+- Код читается только из файла (путь из профиля `unlock.code_file` или `--code-file`) либо из
+  переменной `BANK_COLLECTOR_CODE`. В командной строке код не передаётся — иначе он попадёт в
+  историю и в `ps`.
+- Файл должен быть `0600`: файл, читаемый группой или всеми, инструмент откажется использовать
+  (код выхода 3) и подскажет `chmod 600`.
+- Код никогда не пишется в логи, отчёты, JSON и сообщения об ошибках — везде `***`.
+- За один запуск вводится **не больше одного кода**. Если экран пишет «Осталось N попыток» и
+  N меньше `min_attempts_left` (по умолчанию 3), инструмент не вводит ничего: лучше разовый
+  ручной вход, чем блокировка кабинета.
+- Печатается ровно одна строка: `UNLOCK: экран «Секретный код» — код введён` или
+  `UNLOCK: не удалось (<причина>)`. Если экрана нет — тишина, обычная работа.
+- Экран живёт на `private.auth.alfabank.ru/passport/cerberus-mini/dashboard/pincode`; селекторы
+  профиля сняты с него 24.10.2026, но сквозной ввод кода намеренно не проверялся (на экране
+  оставалось 2 попытки) — считайте это «проверено по разметке, не по результату».
+
+Это единственное место в коде, где есть `fill`/`click` (`bank_collector/unlock.py`); всё
+остальное — чтение.
+
 ## Ограничения и риски (читать до запуска)
 
 - **Читается только отрисованная страница**: ни прокрутки, ни пагинации, ни кнопки «Скачать
   выписку». Альфа отдаёт первую страницу истории — 20 операций; более старые в отчёт не попадут.
 - **Селекторы ломаются** при любом редизайне кабинета; это обслуживание, а не «поставил и забыл».
-- **Сессия истекает** (обычно недели–месяцы): нужно один раз вручную войти снова.
+- **Сессия истекает** (обычно недели–месяцы): либо один раз вручную войти снова, либо положить
+  постоянный код кабинета в файл и запускать с `--enter-code` (см. раздел ниже).
 - **Антифрод**: банк может отреагировать на необычную автоматизацию; автоматизацию входа мы не
   делаем именно поэтому.
 - **ToS**: у банков есть запрет на автоматизированный доступ; риск блокировки — на вас.

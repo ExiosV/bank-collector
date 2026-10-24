@@ -14,6 +14,7 @@ __all__ = [
     "DEFAULT_CDP_URL",
     "BrowserUnavailable",
     "PageAdapter",
+    "FrameAdapter",
     "ElementAdapter",
     "connect",
     "available_browsers",
@@ -79,7 +80,13 @@ def connect(cdp_url=DEFAULT_CDP_URL, timeout_ms=15000):
 
 
 class ElementAdapter(object):
-    """Adapt a Playwright element handle to the protocol of ``collect``."""
+    """Adapt a Playwright element handle to the protocol of ``collect``.
+
+    ``fill`` and ``click`` are the ONLY write primitives of the whole
+    package.  They are used by one single place — ``bank_collector.unlock``,
+    which types the cabinet's static code on the screen it has recognised —
+    and by nothing else: the collector itself never touches them.
+    """
 
     def __init__(self, handle):
         self._handle = handle
@@ -92,6 +99,39 @@ class ElementAdapter(object):
 
     def get_attribute(self, name):
         return self._handle.get_attribute(name)
+
+    # -- the only two writes of the package --------------------------------
+    def fill(self, value):
+        """Type *value* into the element (used only by ``unlock``)."""
+        return self._handle.fill(value)
+
+    def click(self):
+        """Click the element (used only by ``unlock``)."""
+        return self._handle.click()
+
+
+class FrameAdapter(object):
+    """Adapt a Playwright frame to the read protocol of ``collect``.
+
+    Some banks render the code screen inside an iframe.  A frame is read
+    exactly like a page: the same selectors, the same element adapter.
+    """
+
+    def __init__(self, frame):
+        self._frame = frame
+
+    @property
+    def url(self):
+        return self._frame.url
+
+    def query_all(self, selector):
+        return [ElementAdapter(handle) for handle in self._frame.query_selector_all(selector)]
+
+    def text_content(self):
+        try:
+            return self._frame.inner_text("body")
+        except Exception:  # pragma: no cover - defensive
+            return ""
 
 
 class PageAdapter(object):
@@ -119,6 +159,15 @@ class PageAdapter(object):
 
     def query_all(self, selector):
         return [ElementAdapter(handle) for handle in self._page.query_selector_all(selector)]
+
+    @property
+    def frames(self):
+        """The child frames of the page (the code screen may live in one)."""
+        try:
+            frames = self._page.frames
+        except Exception:  # pragma: no cover - defensive
+            return []
+        return [FrameAdapter(frame) for frame in frames or []]
 
     # -- snapshots -------------------------------------------------------
     def content(self):

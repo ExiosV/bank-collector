@@ -4,11 +4,19 @@ Exit codes
 ----------
 0   everything went fine
 2   no browser could be attached (browser not started / no debugging port)
-3   the profile is missing or invalid
+3   the profile is missing or invalid, or the code file of ``--enter-code``
+    is missing or readable by other users
 4   the page was read but nothing could be extracted (warning is printed)
 
 The tool never asks for a password, an SMS code or a cookie, and it never
 logs in. It only reads the page that is already open in *your* browser.
+
+The single exception is ``--enter-code``: it is off by default and answers
+the cabinet's static "secret code" screen (not an SMS code) — the permanent
+cabinet code, which is read from a file of mode 0600 outside the repository
+and is never printed, logged or passed on the command line. Even then the
+tool types at most one code per run and refuses to type at all when the
+screen says that too few attempts are left.
 """
 
 import argparse
@@ -22,6 +30,7 @@ from .collect import DEFAULT_TIMEOUT_MS, collect
 from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
+from .unlock import DEFAULT_UNLOCK_TIMEOUT_MS, handle_code_screen
 
 __all__ = ["main", "build_parser"]
 
@@ -30,18 +39,25 @@ EXIT_NO_BROWSER = 2
 EXIT_BAD_PROFILE = 3
 EXIT_NOTHING = 4
 
+#: The line that is printed on stdout when the code screen was handled.
+UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
+UNLOCK_FAILED = "UNLOCK: не удалось (%s)"
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="bank-collector",
         description=(
             "Read your own bank cabinet in a browser you already logged into. "
-            "Read-only: no login, no credentials, no clicking on anything."
+            "Read-only by default: no login, no credentials, no clicking on anything. "
+            "With --enter-code the cabinet's static 'secret code' screen (not an SMS "
+            "code) is answered once, from a file of mode 0600."
         ),
         epilog=(
             "Examples:\n"
             "  bank-collector --bank example --cdp-url http://127.0.0.1:9222\n"
             "  bank-collector --bank example --out data --csv\n"
+            "  bank-collector --bank alfa --enter-code --code-file ~/.config/bank-collector/alfa-code\n"
             "  bank-collector --list-profiles\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -54,6 +70,23 @@ def build_parser():
         help=(
             "CDP endpoint of the browser you started yourself "
             "(default: %(default)s). A playwriter relay URL is accepted too."
+        ),
+    )
+    parser.add_argument(
+        "--enter-code",
+        action="store_true",
+        help=(
+            "answer the cabinet's static 'secret code' screen once, if it shows up "
+            "(off by default; the code is read from a file of mode 0600)"
+        ),
+    )
+    parser.add_argument(
+        "--code-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "file with the cabinet's static code (mode 0600, outside the repository). "
+            "Without --enter-code it is ignored (a warning is printed)."
         ),
     )
     parser.add_argument(
@@ -149,6 +182,79 @@ def _snapshot(page, out_dir, bank):
     return [html_path, text_path], None
 
 
+def _same_url(left, right):
+    """Compare two URLs ignoring a trailing slash."""
+    if not left or not right:
+        return left == right
+    return left.rstrip("/") == right.rstrip("/")
+
+
+class _AlreadyOpenPage(object):
+    """A page proxy whose ``goto`` of the already open URL does nothing.
+
+    ``collect()`` opens the cabinet itself.  After the unlock the cabinet is
+    already there, and a second ``goto`` would reload the page — which would
+    throw the freshly unlocked session away.  This proxy swallows exactly
+    that one call and passes everything else through.
+    """
+
+    def __init__(self, page, url):
+        self._page = page
+        self._url = url
+
+    @property
+    def url(self):
+        return getattr(self._page, "url", self._url)
+
+    def goto(self, url, *args, **kwargs):
+        if _same_url(url, self._url):
+            return None
+        return self._page.goto(url, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+
+def _unlock(page, profile, args):
+    """Handle the cabinet's static-code screen, if it shows up.
+
+    Returns ``None`` when the run may continue, or the exit code when it
+    must stop (the code file is missing or readable by other users).  When
+    no code screen is detected nothing is printed at all.
+    """
+    config = profile.get("unlock") or {}
+    url = profile.get("url")
+    try:
+        page.goto(url)
+    except Exception as exc:
+        sys.stderr.write("cannot open %s: %s\n" % (url, exc))
+        return EXIT_NO_BROWSER
+
+    result = handle_code_screen(
+        page,
+        config=config,
+        code_path=args.code_file,
+        timeout_ms=min(args.timeout, DEFAULT_UNLOCK_TIMEOUT_MS),
+        ready_selector=profile.get("wait_for"),
+    )
+
+    if not result["detected"]:
+        # No code screen: the run continues exactly as it would without the
+        # flag, and nothing is printed.
+        return None
+
+    if result["entered"]:
+        sys.stdout.write("%s\n" % UNLOCK_OK)
+    else:
+        sys.stdout.write("%s\n" % (UNLOCK_FAILED % result["reason"]))
+    sys.stdout.flush()
+
+    if result["fatal"]:
+        sys.stderr.write("unlock error: %s\n" % result["reason"])
+        return EXIT_BAD_PROFILE
+    return None
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -159,6 +265,9 @@ def main(argv=None):
 
     if not args.bank:
         parser.error("--bank is required (or use --list-profiles)")
+
+    if args.code_file and not args.enter_code:
+        sys.stderr.write("warning: --code-file is ignored without --enter-code\n")
 
     try:
         profile = load_profile(args.bank)
@@ -192,7 +301,14 @@ def main(argv=None):
             return EXIT_NO_BROWSER
         page = PageAdapter(raw_page, timeout_ms=args.timeout)
 
-        collected = collect(page, profile, timeout_ms=args.timeout)
+        collect_target = page
+        if args.enter_code:
+            fatal = _unlock(page, profile, args)
+            if fatal is not None:
+                return fatal
+            collect_target = _AlreadyOpenPage(page, profile.get("url"))
+
+        collected = collect(collect_target, profile, timeout_ms=args.timeout)
         report = report_mod.build_report(collected)
 
         if args.snapshot:

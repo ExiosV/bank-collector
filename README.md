@@ -3,7 +3,8 @@
 **EN (short):** Read your own bank cabinet in a browser you already logged into. Read-only DOM
 extraction over CDP: no login automation, no passwords, no SMS codes, no clicks on "download
 statement", "pay" or "transfer". Data stays local (git-ignored `data/`). Banks are added as YAML
-profiles; today `example` is a tested synthetic profile and `alfa` is an unverified placeholder.
+profiles; today `alfa` is verified against a live cabinet and `example` is a synthetic profile
+used by the tests.
 
 ---
 
@@ -33,8 +34,13 @@ profiles; today `example` is a tested synthetic profile and `alfa` is an unverif
 ```bash
 pip install -e .
 bank-collector --list-profiles
+bank-collector --bank alfa --cdp-url http://127.0.0.1:9222           # реальный кабинет Альфы
 bank-collector --bank example --cdp-url http://127.0.0.1:9222        # пример (синтетический)
-bank-collector --bank example --snapshot                              # + обезличенный снапшот страницы
+bank-collector --bank alfa --snapshot                                # + обезличенный снапшот страницы
+
+# Если браузер подключён через реле Playwriter, вместо порта отладки можно дать его CDP-адрес:
+bank-collector --bank alfa --cdp-url "ws://<host>:19988/cdp?token=<token>"
+
 ```
 
 Выходные файлы: `data/<bank>-<дата>.json` и `.csv`. Коды возврата: `0` — успех, `2` — браузер
@@ -45,13 +51,20 @@ bank-collector --bank example --snapshot                              # + обе
 | Профиль | Статус | Что читает | Проверено на живой странице |
 |---|---|---|---|
 | `example` | verified (синтетика) | остатки, операции | — (фикстура в тестах) |
-| `alfa` | **unverified** | остатки, операции | **нет**, селекторы — заглушки `TODO-*` |
+| `alfa` | **verified, 2026-10-24** | остатки по продуктам с главной, операции с `/history/` | да, живой кабинет в desktop Chrome |
+
+Что именно читает `alfa`: на `web.alfabank.ru/dashboard/` — блоки продуктов с суммой (рекламные
+блоки без суммы пропускаются), на `web.alfabank.ru/history/` — операции, сгруппированные по дням
+(дата берётся у группы, а не у строки). Это два разных адреса, поэтому профиль описывает страницу
+для каждого раздела.
 
 «unverified» значит ровно то, что написано: профиль не проверяли на реальном кабинете, и он,
 скорее всего, не заработает без правки селекторов. Мы не выдаём непроверенное за рабочее.
 
 ## Ограничения и риски (читать до запуска)
 
+- **Читается только отрисованная страница**: ни прокрутки, ни пагинации, ни кнопки «Скачать
+  выписку». Альфа отдаёт первую страницу истории — 20 операций; более старые в отчёт не попадут.
 - **Селекторы ломаются** при любом редизайне кабинета; это обслуживание, а не «поставил и забыл».
 - **Сессия истекает** (обычно недели–месяцы): нужно один раз вручную войти снова.
 - **Антифрод**: банк может отреагировать на необычную автоматизацию; автоматизацию входа мы не

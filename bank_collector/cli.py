@@ -19,7 +19,7 @@ import time
 
 from . import __version__, report as report_mod
 from .collect import DEFAULT_TIMEOUT_MS, collect
-from .connect import DEFAULT_CDP_URL, BrowserUnavailable, connect
+from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
 
@@ -172,17 +172,25 @@ def main(argv=None):
         sys.stderr.write("browser error: %s\n" % exc)
         return EXIT_NO_BROWSER
 
+    own_page = None
     try:
         contexts = browser.contexts
         if not contexts:
             sys.stderr.write("browser error: the attached browser has no open context.\n")
             return EXIT_NO_BROWSER
         context = contexts[0]
-        pages = list(context.pages)
-        if pages:
-            page = pages[0]
-        else:
-            page = context.new_page()
+
+        # Prefer a tab of our own: the tabs the person already has open are
+        # theirs, and navigating one of them would throw away their page state.
+        try:
+            own_page = context.new_page()
+        except Exception:
+            own_page = None
+        raw_page = own_page or (list(context.pages) or [None])[0]
+        if raw_page is None:
+            sys.stderr.write("browser error: the attached browser has no tab to read.\n")
+            return EXIT_NO_BROWSER
+        page = PageAdapter(raw_page, timeout_ms=args.timeout)
 
         collected = collect(page, profile, timeout_ms=args.timeout)
         report = report_mod.build_report(collected)
@@ -229,7 +237,12 @@ def main(argv=None):
             return EXIT_NOTHING
         return EXIT_OK
     finally:
-        # Never close the user's browser: stop the Playwright client only.
+        # Close the tab we opened ourselves, and never the person's browser.
+        if own_page is not None:
+            try:
+                own_page.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
         try:
             playwright.stop()
         except Exception:  # pragma: no cover - defensive

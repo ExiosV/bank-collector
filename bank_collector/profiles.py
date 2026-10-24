@@ -29,6 +29,29 @@ Canonical form::
 ``bank``, ``status``, ``url`` and ``wait_for`` are required. ``balances`` and
 ``transactions`` are optional, but at least one of them must be there.
 
+A record (one entry of ``balances`` or ``transactions``) accepts the keys
+``row``, ``fields``, ``url``, ``wait_for`` and ``items``:
+
+``row``
+    CSS selector of the repeating container. Optional — without it the whole
+    page is treated as a single row.
+``fields``
+    Mapping "field name → specification" (``selector``, optional ``attr``,
+    optional ``regex``/``group``).
+``url``
+    Optional: a page of its own. When the URL differs from the page that is
+    currently open, the driver opens it (a plain ``goto``) before reading the
+    record. Needed when the balances and the statement live on different
+    pages.
+``wait_for``
+    Optional: a CSS selector the driver waits for after opening ``url``
+    (or on the current page when there is no ``url``).
+``items``
+    Optional: a nested record (only ``row`` and ``fields``) describing rows
+    *inside* every ``row`` of the group. The fields of the group and of the
+    item are merged into one output row — used when the operations of a day
+    are grouped under a shared date. ``items`` inside ``items`` is rejected.
+
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
 
@@ -63,6 +86,9 @@ _REQUIRED_KEYS = ("bank", "status", "url", "wait_for")
 _OPTIONAL_KEYS = ("balances", "transactions")
 _ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes",)
 _FIELD_KEYS = ("selector", "attr", "regex", "group")
+
+# The keys a record (one entry of ``balances``/``transactions``) may carry.
+_RECORD_KEYS = ("row", "fields", "url", "wait_for", "items")
 
 # A profile describes *what to read*, never *how to log in*. Any field whose
 # name looks like a credential is rejected outright, so that a login, a
@@ -197,30 +223,92 @@ def _check_field(name, spec, where):
         raise ProfileError("%s: field %r: 'group' must be an integer" % (where, name))
 
 
+def _normalise_items(index, items, where):
+    """Validate the nested ``items`` mapping of a record.
+
+    ``items`` may only carry ``row`` and ``fields``: a group of rows never
+    navigates on its own and never holds another group (``items`` inside
+    ``items`` is rejected).
+    """
+    if not isinstance(items, dict):
+        raise ProfileError("%s: record #%d: 'items' must be a mapping" % (where, index))
+
+    if "items" in items:
+        raise ProfileError(
+            "%s: record #%d: 'items' must not contain 'items' — a group of a group "
+            "is not supported" % (where, index)
+        )
+    for key in ("url", "wait_for"):
+        if key in items:
+            raise ProfileError(
+                "%s: record #%d: 'items' must not contain %r — the page is opened "
+                "once per record, not per group" % (where, index, key)
+            )
+
+    unknown = sorted(set(items) - {"row", "fields"})
+    if unknown:
+        raise ProfileError(
+            "%s: record #%d: 'items' has unknown key(s) %s (allowed: row, fields)"
+            % (where, index, ", ".join(unknown))
+        )
+
+    row = items.get("row")
+    if row is not None and (not isinstance(row, str) or not row.strip()):
+        raise ProfileError("%s: record #%d: 'items.row' must be a non-empty string" % (where, index))
+
+    fields = items.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        raise ProfileError(
+            "%s: record #%d: 'items.fields' must be a non-empty mapping" % (where, index)
+        )
+
+    for name, spec in fields.items():
+        _check_field(name, spec, "%s record #%d items" % (where, index))
+
+    return {"row": row, "fields": fields}
+
+
 def _normalise_record(index, record, section, where):
     if not isinstance(record, dict):
         raise ProfileError("%s: record #%d must be a mapping" % (where, index))
 
-    row = record.get("row")
-    if row is not None and (not isinstance(row, str) or not row.strip()):
-        raise ProfileError("%s: record #%d: 'row' must be a non-empty string" % (where, index))
+    url = None
+    wait_for = None
+    items = None
 
     if "fields" in record:
-        unknown = sorted(set(record) - {"row", "fields"})
+        unknown = sorted(set(record) - set(_RECORD_KEYS))
         if unknown:
             raise ProfileError(
-                "%s: record #%d has unknown key(s) %s (allowed: row, fields)"
-                % (where, index, ", ".join(unknown))
+                "%s: record #%d has unknown key(s) %s (allowed: %s)"
+                % (where, index, ", ".join(unknown), ", ".join(_RECORD_KEYS))
             )
         fields = record.get("fields")
         if not isinstance(fields, dict) or not fields:
             raise ProfileError("%s: record #%d: 'fields' must be a non-empty mapping" % (where, index))
+        url = record.get("url")
+        wait_for = record.get("wait_for")
+        items = record.get("items")
     else:
+        # The "flat" sugar form: the fields sit directly under the record. A
+        # field may be named "url"/"wait_for" as long as its value is a
+        # mapping (a field specification) and not a string.
+        reserved = set()
+        for key in ("url", "wait_for"):
+            if key in record and isinstance(record[key], str):
+                reserved.add(key)
+        if "items" in record:
+            value = record["items"]
+            if isinstance(value, dict) and "selector" not in value:
+                reserved.add("items")
         fields = {}
         for key, value in record.items():
-            if key == "row":
+            if key == "row" or key in reserved:
                 continue
             fields[key] = value
+        url = record.get("url") if "url" in reserved else None
+        wait_for = record.get("wait_for") if "wait_for" in reserved else None
+        items = record.get("items") if "items" in reserved else None
 
     if not fields:
         raise ProfileError("%s: record #%d has no fields" % (where, index))
@@ -228,7 +316,34 @@ def _normalise_record(index, record, section, where):
     for name, spec in fields.items():
         _check_field(name, spec, "%s record #%d" % (where, index))
 
-    return {"row": row, "fields": fields}
+    row = record.get("row")
+    if row is not None and (not isinstance(row, str) or not row.strip()):
+        raise ProfileError("%s: record #%d: 'row' must be a non-empty string" % (where, index))
+
+    if url is not None:
+        if not isinstance(url, str) or not url.strip():
+            raise ProfileError("%s: record #%d: 'url' must be a non-empty string" % (where, index))
+        if not url.startswith(("http://", "https://")):
+            raise ProfileError(
+                "%s: record #%d: 'url' must start with http:// or https://" % (where, index)
+            )
+
+    if wait_for is not None and (not isinstance(wait_for, str) or not wait_for.strip()):
+        raise ProfileError(
+            "%s: record #%d: 'wait_for' must be a non-empty CSS selector" % (where, index)
+        )
+
+    normalised_items = None
+    if items is not None:
+        normalised_items = _normalise_items(index, items, where)
+
+    return {
+        "row": row,
+        "fields": fields,
+        "url": url,
+        "wait_for": wait_for,
+        "items": normalised_items,
+    }
 
 
 def _validate(data, path):

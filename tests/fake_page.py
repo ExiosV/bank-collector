@@ -9,8 +9,20 @@ so this module implements the small part of the DOM that
 * ``query_all(selector)``
 * ``content()`` / ``inner_text(selector)``
 
-The CSS subset supported here covers what the shipped profiles use:
-``tag``, ``.class``, ``#id`` and the descendant combinator (space).
+It also ships a small CSS engine, because real bank pages are anchored on
+``data-test-id`` attributes and nest their rows deeply. The subset supported
+here covers what the shipped profiles use:
+
+* ``tag``, ``.class``, ``#id``;
+* the descendant combinator (a space) and the child combinator (``>``);
+* attribute selectors: ``[a]``, ``[a=v]``, ``[a^=v]``, ``[a$=v]``,
+  ``[a*=v]`` — the value may be quoted or not;
+* ``:has(<inner>)``: the element contains a matching descendant
+  (``div:has(span)``) or a matching direct child (``div:has(> span)``).
+  Several ``:has()`` may sit in one compound selector and one may hold
+  another one (``div:has(> [data-date]):has(> button)``).
+
+Only the standard library is used.
 """
 
 import re
@@ -50,7 +62,8 @@ class FakeElement(object):
 
     # -- DOM API used by the collector -----------------------------------
     def query_all(self, selector):
-        return [node for node in self.iter_descendants() if _matches_chain(node, selector)]
+        steps = _parse_selector(selector)
+        return [node for node in self.iter_descendants() if _matches_steps(node, steps)]
 
     def text_content(self):
         parts = list(self._text_parts)
@@ -96,63 +109,294 @@ def parse_html(html):
     return builder.root
 
 
-_COMPOUND_RE = re.compile(
-    r"(?P<tag>[a-zA-Z][\w-]*)?"
-    r"(?P<rest>(?:[.#][\w-]+)*)$"
-)
+# ---------------------------------------------------------------------------
+# A tiny CSS engine
+# ---------------------------------------------------------------------------
+
+_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]*")
+_NAME_RE = re.compile(r"[^\s~^$*|=]+")
+_ATTR_RE = re.compile(r"\s*([^\s~^$*|=]+)\s*(.*)$", re.S)
+_OP_RE = re.compile(r"\s*(~=|\|=|\^=|\$=|\*=|=)\s*(.*)$", re.S)
 
 
-def _parse_compound(compound):
-    match = _COMPOUND_RE.match(compound)
+class _Compound(object):
+    """One compound selector: a tag plus classes, id, attributes and :has()."""
+
+    __slots__ = ("tag", "classes", "ids", "attrs", "has")
+
+    def __init__(self):
+        self.tag = None
+        self.classes = []
+        self.ids = []
+        self.attrs = []
+        self.has = []
+
+
+def _find_closing(text, start, opener, closer):
+    """Index just after the closing *closer* that matches *opener* at *start*."""
+    depth = 0
+    quote = None
+    index = start
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(text)
+
+
+def _parse_attribute(text, start):
+    """Parse ``[name op value]`` at *start*; return ``((name, op, value), end)``."""
+    end = _find_closing(text, start, "[", "]")
+    body = text[start + 1 : end - 1 if text[end - 1 : end] == "]" else end]
+
+    match = _ATTR_RE.match(body)
     if not match:
-        return None
-    tag = match.group("tag")
-    classes = []
-    element_id = None
-    for token in re.findall(r"[.#][\w-]+", match.group("rest") or ""):
-        if token.startswith("."):
-            classes.append(token[1:])
+        return ("", None, None), end
+    name = match.group(1)
+    rest = match.group(2)
+    if not rest.strip():
+        return (name, None, None), end
+
+    op_match = _OP_RE.match(rest)
+    if not op_match:
+        return (name, None, None), end
+    operator = op_match.group(1)
+    value = op_match.group(2).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return (name, operator, value), end
+
+
+def _parse_compound(text):
+    """Parse a compound selector (no combinators inside)."""
+    compound = _Compound()
+    index = 0
+    length = len(text)
+
+    if index < length and text[index].isalpha():
+        tag_match = _TAG_RE.match(text, index)
+        compound.tag = tag_match.group(0)
+        index = tag_match.end()
+
+    while index < length:
+        char = text[index]
+        if char == ".":
+            name_match = _NAME_RE.match(text, index + 1)
+            if not name_match:
+                break
+            compound.classes.append(name_match.group(0))
+            index = name_match.end()
+        elif char == "#":
+            name_match = _NAME_RE.match(text, index + 1)
+            if not name_match:
+                break
+            compound.ids.append(name_match.group(0))
+            index = name_match.end()
+        elif char == "[":
+            attribute, index = _parse_attribute(text, index)
+            compound.attrs.append(attribute)
+        elif char == ":":
+            name_match = _TAG_RE.match(text, index + 1)
+            if not name_match:
+                break
+            name = name_match.group(0).lower()
+            index = name_match.end()
+            if name == "has":
+                after = _find_closing(text, index, "(", ")")
+                inner = text[index + 1 : after - 1 if text[after - 1 : after] == ")" else after]
+                compound.has.append(_parse_steps(inner))
+                index = after
+            else:
+                # Unknown pseudo-classes are ignored, like a browser would
+                # ignore an unknown one it cannot match.
+                pass
         else:
-            element_id = token[1:]
-    return tag, classes, element_id
+            index += 1
+
+    return compound
+
+
+def _parse_steps(text):
+    """Parse a selector into a list of ``(relation, compound)`` steps.
+
+    *relation* says how the compound relates to the previous one: ``' '``
+    (descendant) or ``'>'`` (direct child). For the first step the relation
+    says how it relates to the scope of the selector (``':has(> x)'`` uses a
+    direct child of the scoped element).
+    """
+    steps = []
+    index = 0
+    length = len(text)
+    pending = None
+
+    while index < length:
+        start = index
+        while index < length and text[index].isspace():
+            index += 1
+        saw_space = index > start
+
+        if index >= length:
+            break
+        if text[index] == ">":
+            pending = ">"
+            index += 1
+            continue
+        if saw_space and steps and pending is None:
+            pending = " "
+
+        parts = []
+        while index < length:
+            char = text[index]
+            if char == "(":
+                after = _find_closing(text, index, "(", ")")
+                parts.append(text[index:after])
+                index = after
+                continue
+            if char.isspace() or char == ">":
+                break
+            parts.append(char)
+            index += 1
+
+        chunk = "".join(parts)
+        if not chunk:
+            break
+        steps.append((pending if pending is not None else " ", _parse_compound(chunk)))
+        pending = None
+
+    return steps
+
+
+_SELECTOR_CACHE = {}
+
+
+def _parse_selector(selector):
+    """Parse (and cache) *selector* into steps."""
+    steps = _SELECTOR_CACHE.get(selector)
+    if steps is None:
+        steps = _parse_steps(selector)
+        _SELECTOR_CACHE[selector] = steps
+    return steps
 
 
 def _matches_compound(element, compound):
-    parsed = _parse_compound(compound)
-    if parsed is None:
+    """True when *element* matches the simple selectors of *compound*."""
+    if compound.tag is not None and element.tag.lower() != compound.tag.lower():
         return False
-    tag, classes, element_id = parsed
-    if tag and element.tag.lower() != tag.lower():
-        return False
-    if element_id and element.attrs.get("id") != element_id:
-        return False
-    if classes:
+
+    if compound.classes:
         own = (element.attrs.get("class") or "").split()
-        for wanted in classes:
+        for wanted in compound.classes:
             if wanted not in own:
                 return False
-    return True
 
-
-def _matches_chain(element, selector):
-    parts = [part for part in selector.strip().split() if part]
-    if not parts:
-        return False
-    if not _matches_compound(element, parts[-1]):
+    if compound.ids and element.attrs.get("id") not in compound.ids:
         return False
 
-    ancestor = element.parent
-    for part in reversed(parts[:-1]):
-        found = False
-        while ancestor is not None:
-            if _matches_compound(ancestor, part):
-                found = True
-                ancestor = ancestor.parent
-                break
-            ancestor = ancestor.parent
-        if not found:
+    for name, operator, value in compound.attrs:
+        actual = element.attrs.get(name)
+        if actual is None:
             return False
+        if operator is None:
+            continue
+        if operator == "=":
+            if actual != value:
+                return False
+        elif operator == "^=":
+            if not actual.startswith(value):
+                return False
+        elif operator == "$=":
+            if not actual.endswith(value):
+                return False
+        elif operator == "*=":
+            if value not in actual:
+                return False
+        elif operator == "~=":
+            if value not in actual.split():
+                return False
+        elif operator == "|=":
+            if not (actual == value or actual.startswith(value + "-")):
+                return False
+
+    for inner in compound.has:
+        if not _matches_relative(element, inner):
+            return False
+
     return True
+
+
+def _matches_relative(scope, steps):
+    """True when *scope* contains an element matching the relative *steps*."""
+    if not steps:
+        return False
+
+    relation = steps[0][0]
+    if relation == ">":
+        roots = list(scope.children)
+    else:
+        roots = list(scope.iter_descendants())
+
+    for root in roots:
+        if _matches_compound(root, steps[0][1]) and _matches_descendants(root, steps, 1):
+            return True
+    return False
+
+
+def _matches_descendants(node, steps, index):
+    """True when the chain below *node* matches ``steps[index:]``."""
+    if index >= len(steps):
+        return True
+
+    relation, compound = steps[index]
+    if relation == ">":
+        pool = list(node.children)
+    else:
+        pool = list(node.iter_descendants())
+
+    for candidate in pool:
+        if _matches_compound(candidate, compound) and _matches_descendants(candidate, steps, index + 1):
+            return True
+    return False
+
+
+def _matches_ancestors(node, steps, index):
+    """True when the ancestors of *node* match ``steps[:index]``."""
+    if index <= 0:
+        return True
+
+    relation = steps[index][0]
+    previous = steps[index - 1][1]
+
+    if relation == ">":
+        parent = node.parent
+        if parent is None or not _matches_compound(parent, previous):
+            return False
+        return _matches_ancestors(parent, steps, index - 1)
+
+    ancestor = node.parent
+    while ancestor is not None:
+        if _matches_compound(ancestor, previous) and _matches_ancestors(ancestor, steps, index - 1):
+            return True
+        ancestor = ancestor.parent
+    return False
+
+
+def _matches_steps(element, steps):
+    """True when *element* matches the whole (absolute) selector."""
+    if not steps:
+        return False
+    if not _matches_compound(element, steps[-1][1]):
+        return False
+    return _matches_ancestors(element, steps, len(steps) - 1)
 
 
 class FakePage(object):

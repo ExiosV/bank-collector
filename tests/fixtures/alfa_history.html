@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture for the `alfa` profile: the operations page. It is NOT a
+  real Alfa-Bank page — the counterparties and every amount are invented.
+
+  It reproduces the one thing that matters for the extractor: operations are
+  grouped by day. One wrapper holds ONE date element and N operation buttons,
+  so the date of an operation is a sibling of the button, not a child of it:
+
+    div                                     <- the group (row of the profile)
+      div[data-date="..."]                  <- the day
+      button[data-test-id="operation-cell"] <- an operation (item)
+-->
+<html lang="ru">
+<body>
+<div class="operations">
+  <div>
+    <div data-date="2026-01-15T10:00:00.000+0300"><span>Четверг, 15 января</span></div>
+    <button type="button" data-test-id="operation-cell">
+      <section data-test-id="operation-cell-content">
+        <section data-test-id="operation-cell-main">
+          <div><div data-test-id="title-text_content">Магазин «Пример»</div></div>
+          <div data-test-id="cell-pure-category"><span data-test-id="transaction-category-name">Супермаркеты</span></div>
+        </section>
+        <section data-test-id="operation-cell-addon">
+          <div data-test-id="transaction-status">-<span>1 250</span><span>,50 ₽</span></div>
+        </section>
+      </section>
+    </button>
+  </div>
+  <div>
+    <div data-date="2026-01-14T09:30:00.000+0300"><span>Среда, 14 января</span></div>
+    <button type="button" data-test-id="operation-cell">
+      <section data-test-id="operation-cell-content">
+        <section data-test-id="operation-cell-main">
+          <div><div data-test-id="title-text_content">Иван И.</div></div>
+          <div data-test-id="cell-pure-category"><span data-test-id="transaction-category-name">Переводы · СБП · Пример-Банк</span></div>
+        </section>
+        <section data-test-id="operation-cell-addon">
+          <div data-test-id="transaction-status">+<span>30 000</span><span>,00 ₽</span></div>
+        </section>
+      </section>
+    </button>
+    <button type="button" data-test-id="operation-cell">
+      <section data-test-id="operation-cell-content">
+        <section data-test-id="operation-cell-main">
+          <div><div data-test-id="title-text_content">Кофейня «Пример»</div></div>
+          <div data-test-id="cell-pure-category"><span data-test-id="transaction-category-name">Кафе и рестораны</span></div>
+        </section>
+        <section data-test-id="operation-cell-addon">
+          <div data-test-id="transaction-status">-<span>99</span><span>,00 ₽</span></div>
+        </section>
+      </section>
+    </button>
+  </div>
+</div>
+</body>
+</html>

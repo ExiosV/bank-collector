@@ -7,7 +7,10 @@
 # transactions contain what the first screen of /history/ shows.
 bank: alfa
 status: verified
-notes: "Checked on 2026-10-24 against a desktop Chrome session; the dashboard and the first page of /history/ only, no scrolling and no statement download."
+notes: >-
+  Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the first page of
+  /history/ only (no scrolling, no pagination, no statement download). The "common balance"
+  widget is not the sum of the product cards, so the profile reads the cards and ignores it.
 url: "https://web.alfabank.ru/dashboard/"
 wait_for: "[data-test-id=common-balance-button]"
 

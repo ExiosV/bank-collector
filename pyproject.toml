@@ -22,7 +22,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Office/Business :: Financial",
 ]
-dependencies = ["playwright>=1.40"]
+# PyYAML is the real profile parser: the bundled `miniyaml` is a strict
+# stdlib fallback that cannot read every YAML construct (e.g. folded
+# scalars), so a clean venv without it may refuse a valid profile.
+dependencies = ["playwright>=1.40", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

@@ -17,3 +17,15 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.DS_Store
+.env
+.env.local
+*.pem
+*.key
+*.pyc
+.idea/
+Thumbs.db
+*.log
+*.tmp
+*.bak
+node_modules/

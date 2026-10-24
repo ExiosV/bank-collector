@@ -1,0 +1,31 @@
+# Example profile — a synthetic bank used by the test-suite.
+#
+# The URL points at a non-existent domain on purpose: this profile is never
+# collected from a real site. It is here to show the file format and to be
+# exercised against tests/fixtures/example_dashboard.html.
+#
+# Copy this file to <yourbank>.yaml and adjust it, see docs/ADD_A_BANK.md.
+bank: example
+status: verified
+url: "https://example.invalid/cabinet"
+
+# CSS selector that appears only after the cabinet has rendered.
+wait_for: "#dashboard"
+
+balances:
+  - row: ".balance-card"
+    fields:
+      account:
+        selector: ".balance-card__name"
+      amount:
+        selector: ".balance-card__amount"
+
+transactions:
+  - row: ".transaction-row"
+    fields:
+      date:
+        selector: ".transaction-row__date"
+      amount:
+        selector: ".transaction-row__amount"
+      payee:
+        selector: ".transaction-row__payee"

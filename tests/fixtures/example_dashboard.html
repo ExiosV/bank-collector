@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC TEST FIXTURE — NOT REAL BANK DATA.
+  Every name, number and account below is invented for the test-suite of
+  bank-collector. There is no real bank, no real person and no real money
+  involved here.
+-->
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Synthetic cabinet fixture</title>
+</head>
+<body>
+  <main id="dashboard">
+    <h1>Тестовый кабинет (синтетические данные)</h1>
+
+    <section class="balances">
+      <div class="balance-card">
+        <span class="balance-card__name">Основной счёт • 0000</span>
+        <span class="balance-card__amount">1 234,56 ₽</span>
+      </div>
+      <div class="balance-card">
+        <span class="balance-card__name">Резервный счёт • 0000</span>
+        <span class="balance-card__amount">− 500,00 ₽</span>
+      </div>
+    </section>
+
+    <section class="transactions">
+      <table>
+        <tbody>
+          <tr class="transaction-row">
+            <td class="transaction-row__date">01.02.2026</td>
+            <td class="transaction-row__payee">ООО «Тестовая Ромашка»</td>
+            <td class="transaction-row__amount">−1 500,00 ₽</td>
+          </tr>
+          <tr class="transaction-row">
+            <td class="transaction-row__date">03.02.2026</td>
+            <td class="transaction-row__payee">Зарплата (тест)</td>
+            <td class="transaction-row__amount">100 000.00</td>
+          </tr>
+          <tr class="transaction-row">
+            <td class="transaction-row__date">05.02.2026</td>
+            <td class="transaction-row__payee">Тестовый перевод</td>
+            <td class="transaction-row__amount">2 750,25 ₽</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

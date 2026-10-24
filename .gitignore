@@ -1,0 +1,19 @@
+# Локальные данные банка — никогда не коммитим (см. docs/SECURITY.md)
+data/
+*.csv
+*.json.gz
+
+# Снапшоты страниц
+snapshots/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/

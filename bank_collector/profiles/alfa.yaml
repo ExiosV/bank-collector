@@ -1,0 +1,38 @@
+# Alfa-Bank — UNVERIFIED profile.
+#
+# TODO: the selectors below are placeholders. They have NOT been checked
+# against the live Alfa-Bank page, nobody has run this profile yet.
+# Fill them in yourself after inspecting the page you are already logged
+# into — see docs/ADD_A_BANK.md — and flip `status` to `verified` only once
+# the extracted numbers match what the page shows.
+#
+# This file intentionally contains no login, no password, no cookie and no
+# SMS-code handling: the tool only reads a page you opened yourself.
+bank: alfa
+status: unverified
+url: "https://web.alfabank.ru/dashboard/"
+
+# TODO: replace with the selector of the element that only appears when the
+# overview has finished rendering.
+wait_for: "TODO-alfa-overview-ready-selector"
+
+balances:
+  - row: "TODO-alfa-balance-card-selector"
+    fields:
+      account:
+        selector: "TODO-alfa-balance-account-selector"
+      amount:
+        # TODO: check whether the amount is inside the card or in a
+        # separate popup; `regex`/`group` are only needed if the number is
+        # mixed with other text.
+        selector: "TODO-alfa-balance-amount-selector"
+
+transactions:
+  - row: "TODO-alfa-transaction-row-selector"
+    fields:
+      date:
+        selector: "TODO-alfa-transaction-date-selector"
+      amount:
+        selector: "TODO-alfa-transaction-amount-selector"
+      payee:
+        selector: "TODO-alfa-transaction-payee-selector"

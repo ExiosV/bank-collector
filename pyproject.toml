@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bank-collector"
+version = "0.1.0"
+description = "Read-only collector of your own bank cabinet data from a browser you already logged into"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "ExiosV" }]
+keywords = ["bank", "scraper", "read-only", "cdp", "finance", "personal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = ["playwright>=1.40"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/ExiosV/bank-collector"
+Issues = "https://github.com/ExiosV/bank-collector/issues"
+
+[project.scripts]
+bank-collector = "bank_collector.cli:main"
+
+[tool.setuptools]
+packages = ["bank_collector"]
+
+[tool.setuptools.package-data]
+bank_collector = ["profiles/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

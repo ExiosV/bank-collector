@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ExiosV/bank-collector/schema/transactions.schema.json",
+  "title": "bank-collector transaction entry",
+  "description": "One operation row as extracted from a bank cabinet page.",
+  "type": "object",
+  "properties": {
+    "date": {
+      "description": "Operation date as shown on the page.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "amount": {
+      "description": "Operation amount, sign included.",
+      "oneOf": [
+        { "$ref": "#/definitions/money" },
+        { "type": "null" }
+      ]
+    },
+    "payee": {
+      "description": "Counterparty as shown on the page.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "additionalProperties": {
+    "$ref": "#/definitions/field"
+  },
+  "definitions": {
+    "field": {
+      "type": "object",
+      "properties": {
+        "raw": {
+          "description": "The string exactly as it was read from the page.",
+          "type": ["string", "null"]
+        },
+        "value": {
+          "description": "Normalised value: a plain decimal string for money, the trimmed text otherwise.",
+          "type": ["string", "null"]
+        },
+        "currency": {
+          "description": "Currency taken from the string itself; null when the page showed none. Never guessed.",
+          "type": ["string", "null"]
+        },
+        "money": {
+          "description": "True when the value was recognised as a money string.",
+          "type": "boolean"
+        }
+      },
+      "required": ["raw", "value", "currency", "money"],
+      "additionalProperties": false
+    },
+    "money": {
+      "type": "object",
+      "properties": {
+        "raw": { "type": ["string", "null"] },
+        "value": { "type": ["string", "null"] },
+        "currency": { "type": ["string", "null"] },
+        "money": { "type": "boolean" }
+      },
+      "required": ["raw", "value", "currency", "money"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -36,15 +36,23 @@ things at once:
 If any of the three is missing, nothing happens at all — the run continues as
 it would without ``--enter-code``.
 
-Two guards stand between the screen and the keyboard:
+Three guards stand between the screen and the keyboard:
 
 * the **attempts guard** — the visible text is searched for "осталось N
   попыт"; when fewer than ``min_attempts_left`` tries are left, nothing is
   typed at all and the run says why;
 * the **limit of entries** — at most ``max_attempts`` codes (one by
-  default) are entered in one run, however often the screen reappears.
+  default) are entered in one run, however often the screen reappears;
+* the **one-strike marker** — the live screen does NOT always say how many
+  tries are left (on 2026-10-24 a fresh code screen showed no "осталось N
+  попыток" at all), so a wrong code in the file would be typed once a day
+  until the cabinet locks itself.  Therefore every entry that does not
+  lead to the cabinet leaves a marker file next to the code file, and
+  the next run refuses to type anything until a human removes it (see
+  :func:`write_attempt_failure` and :func:`clear_attempt_failure`).
 """
 
+import datetime
 import os
 import re
 import time
@@ -55,6 +63,9 @@ __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_MIN_ATTEMPTS_LEFT",
     "DEFAULT_UNLOCK_TIMEOUT_MS",
+    "DEFAULT_CODE_FILE",
+    "MARKER_SUFFIX",
+    "FAILED_ENTRY_REASON",
     "ENV_CODE",
     "CodeScreen",
     "UnlockError",
@@ -66,6 +77,10 @@ __all__ = [
     "handle_code_screen",
     "read_code",
     "check_code_file_mode",
+    "attempt_marker_path",
+    "resolve_marker_path",
+    "write_attempt_failure",
+    "clear_attempt_failure",
 ]
 
 #: Phrases that hint at the static-code screen (matched case-insensitively).
@@ -85,6 +100,18 @@ DEFAULT_UNLOCK_TIMEOUT_MS = 10000
 
 #: Environment variable that may hold the code (used only if no file does).
 ENV_CODE = "BANK_COLLECTOR_CODE"
+
+#: Where the code file lives by default — the same path the alfa profile uses.
+DEFAULT_CODE_FILE = "~/.config/bank-collector/alfa-code"
+
+#: The suffix of the "one strike" marker that sits next to the code file.
+MARKER_SUFFIX = ".failed"
+
+#: The reason of a failed entry — it goes into the marker and into the run's
+#: message.  It says "manual entry", so that the owner knows what to do.
+FAILED_ENTRY_REASON = (
+    "ввод не привёл к кабинету — повторная попытка заблокирована, нужен ручной вход"
+)
 
 #: Input types that may carry the code.
 INPUT_TYPES = ("password", "text", "tel", "number")
@@ -501,6 +528,90 @@ def read_code(path=None, profile_path=None, env=None):
     return None, None
 
 
+def attempt_marker_path(code_path=None):
+    """Where the "one strike" marker of the code in *code_path* lives.
+
+    The marker sits right next to the code file — ``alfa-code`` becomes
+    ``alfa-code.failed`` — so that it is covered by the same directory
+    permissions (``0700``) and can never be confused with another bank.
+
+    A code that has no file of its own (it came from the ``BANK_COLLECTOR_CODE``
+    environment variable) has no directory to live in, so the marker falls
+    back to the default location: ``~/.config/bank-collector/alfa-code.failed``.
+
+    The marker never contains the code — only a timestamp and a reason.
+    """
+    if code_path:
+        return os.path.expanduser(str(code_path)) + MARKER_SUFFIX
+    return os.path.expanduser(DEFAULT_CODE_FILE) + MARKER_SUFFIX
+
+
+def resolve_marker_path(code_path=None, profile_path=None):
+    """The marker path that belongs to the code this run would use.
+
+    The sources are looked at in the same order as in :func:`read_code`:
+    the explicit ``--code-file`` first, then the code file of the profile;
+    when neither of them is a file on disk the code comes from the
+    environment and the default location is used.
+    """
+    for candidate in (code_path, profile_path):
+        if candidate:
+            expanded = os.path.expanduser(str(candidate))
+            if os.path.isfile(expanded):
+                return attempt_marker_path(expanded)
+    if code_path:
+        return attempt_marker_path(code_path)
+    return attempt_marker_path(None)
+
+
+def write_attempt_failure(path, reason, when=None):
+    """Write the "one strike" marker to *path*.
+
+    The file holds an ISO timestamp and the *reason* of the failure — the
+    code itself is never written anywhere near it.  The mode is ``0600``
+    even when the file existed before, and the directory (if it has to be
+    created) is ``0700``.
+
+    *when* may be a :class:`datetime.datetime` or a ready-made string; by
+    default the current time is used.
+    """
+    if when is None:
+        stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    elif isinstance(when, datetime.datetime):
+        stamp = when.isoformat(timespec="seconds")
+    else:
+        stamp = str(when)
+
+    directory = os.path.dirname(str(path))
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+
+    handle = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        stream.write("%s\n%s\n" % (stamp, reason))
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    try:
+        os.chmod(str(path), 0o600)
+    except OSError:  # pragma: no cover - defensive
+        pass
+    return str(path)
+
+
+def clear_attempt_failure(path):
+    """Remove the marker at *path*.
+
+    Returns ``True`` when a marker was there and is gone now, ``False``
+    when there was nothing to remove.
+    """
+    try:
+        os.remove(str(path))
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def handle_code_screen(
     page,
     config=None,
@@ -535,7 +646,9 @@ def handle_code_screen(
     ``fatal``
         the run must stop: the code file is missing or readable by others;
     ``code_path``
-        the file the code was expected in.
+        the file the code was expected in;
+    ``marker``
+        the path of the "one strike" marker that guards this code.
     """
     config = dict(config or {})
 
@@ -558,6 +671,7 @@ def handle_code_screen(
         "source": None,
         "fatal": False,
         "code_path": None,
+        "marker": None,
     }
 
     screen = probe_code_screen(
@@ -587,7 +701,20 @@ def handle_code_screen(
         result["reason"] = "лимит ввода кода в этом запуске исчерпан (%d)" % max_attempts
         return result
 
-    # 3. The code itself.
+    # 3. The one-strike marker: a previous entry that did not lead to the
+    #    cabinet stops this run until a human removes the marker.  The code
+    #    is not even read here — nothing is typed and nothing is touched.
+    marker_path = resolve_marker_path(code_path=code_path, profile_path=profile_path)
+    result["marker"] = marker_path
+    result["code_path"] = _first_existing_path(code_path, profile_path)
+    if os.path.exists(marker_path):
+        result["reason"] = (
+            "предыдущая попытка ввода кода не удалась (маркер %s) — нужен ручной вход, "
+            "после проверки удалите файл" % marker_path
+        )
+        return result
+
+    # 4. The code itself.
     if code:
         found, source = str(code), "argument"
     else:
@@ -609,10 +736,30 @@ def handle_code_screen(
 
     result["source"] = source
 
-    # 4. Type it — once.
+    # 5. Type it — once.
     outcome = enter_code(page, found, screen, timeout_ms=timeout_ms)
     result["entered"] = outcome["entered"]
-    result["reason"] = outcome["reason"]
+    if outcome["entered"]:
+        result["reason"] = outcome["reason"]
+        return result
+
+    # The entry did not lead to the cabinet: leave the "one strike" marker
+    # behind, so that the next run refuses to type anything until a human
+    # has looked at the screen.  The marker holds the reason, never the code.
+    detail = _mask(outcome.get("reason") or "", found).strip()
+    marker_reason = FAILED_ENTRY_REASON
+    if detail:
+        marker_reason = "%s: %s" % (FAILED_ENTRY_REASON, detail)
+    try:
+        write_attempt_failure(marker_path, marker_reason)
+    except OSError as exc:
+        result["reason"] = "%s (не удалось записать маркер %s: %s)" % (
+            marker_reason,
+            marker_path,
+            exc,
+        )
+        return result
+    result["reason"] = "%s (маркер %s)" % (marker_reason, marker_path)
     return result
 
 

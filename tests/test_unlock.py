@@ -209,6 +209,138 @@ def test_read_code_precedence(tmp_path, monkeypatch):
     assert (code, source) == ("33333333", "env:BANK_COLLECTOR_CODE")
 
 
+# ── the one-strike marker ────────────────────────────────────────────────────────────────
+def failing_config():
+    """A config whose success selector is not on the screen."""
+    return {"success_wait": "[data-test-id=common-balance-button]"}
+
+
+def test_failed_entry_leaves_a_marker_and_never_the_code(tmp_path):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    page = screen_page()
+
+    result = unlock.handle_code_screen(
+        page,
+        config=failing_config(),
+        code_path=code_path,
+        timeout_ms=1,
+        interval=0,
+        env={},
+    )
+    assert result["detected"] is True
+    assert result["entered"] is False
+    assert result["fatal"] is False
+    assert os.path.exists(marker)
+
+    with open(marker, encoding="utf-8") as handle:
+        content = handle.read()
+    assert CODE not in content
+    assert "ввод не привёл к кабинету" in content
+    assert os.stat(marker).st_mode & 0o777 == 0o600
+
+
+def test_successful_entry_leaves_no_marker(tmp_path):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    page = screen_page(SCREEN_HTML.replace(
+        "</body>", '<div data-test-id="common-balance-button">Все счета</div></body>'))
+
+    result = unlock.handle_code_screen(
+        page,
+        config=failing_config(),
+        code_path=code_path,
+        timeout_ms=1,
+        interval=0,
+        env={},
+    )
+    assert result["entered"] is True, result["reason"]
+    assert not os.path.exists(marker)
+
+
+def test_the_marker_stops_the_next_run(tmp_path):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    unlock.write_attempt_failure(marker, "проверка")
+    page = screen_page()
+
+    result = unlock.handle_code_screen(
+        page, config={}, code_path=code_path, timeout_ms=1, interval=0, env={}
+    )
+    assert result["detected"] is True
+    assert result["entered"] is False
+    assert result["fatal"] is False
+    assert marker in result["reason"]
+    assert page.writes == []
+
+
+def test_the_marker_stops_the_next_run_even_with_the_correct_code(tmp_path):
+    # the marker does not care whether the code in the file is right:
+    # a human has to look at the screen first
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    unlock.write_attempt_failure(marker, "проверка")
+    page = screen_page(SCREEN_HTML.replace(
+        "</body>", '<div data-test-id="common-balance-button">Все счета</div></body>'))
+
+    result = unlock.handle_code_screen(
+        page,
+        config=failing_config(),
+        code_path=code_path,
+        timeout_ms=1,
+        interval=0,
+        env={},
+    )
+    assert result["entered"] is False
+    assert marker in result["reason"]
+    assert page.writes == []
+
+
+def test_a_failed_run_blocks_the_next_run_of_the_same_code(tmp_path):
+    code_path = write_code(tmp_path)
+
+    first = screen_page()
+    unlock.handle_code_screen(
+        first,
+        config=failing_config(),
+        code_path=code_path,
+        timeout_ms=1,
+        interval=0,
+        env={},
+    )
+    assert first.writes == [("fill", CODE), ("click", None)]
+
+    second = screen_page()
+    result = unlock.handle_code_screen(
+        second, config={}, code_path=code_path, timeout_ms=1, interval=0, env={}
+    )
+    assert result["entered"] is False
+    assert second.writes == []
+
+
+def test_the_code_is_masked_in_the_marker(tmp_path, monkeypatch):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+
+    def leaky(page, code, screen, timeout_ms=10000):
+        return {"entered": False, "reason": "не удалось ввести код: %s" % code}
+
+    monkeypatch.setattr(unlock, "enter_code", leaky)
+    result = unlock.handle_code_screen(
+        screen_page(), config={}, code_path=code_path, timeout_ms=1, interval=0, env={}
+    )
+    with open(marker, encoding="utf-8") as handle:
+        content = handle.read()
+    assert CODE not in content
+    assert CODE not in result["reason"]
+
+
+def test_the_marker_of_the_environment_code_lives_in_the_default_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert unlock.attempt_marker_path(None) == str(tmp_path / ".config" / "bank-collector" / "alfa-code.failed")
+    assert unlock.attempt_marker_path("~/alfa-code") == str(tmp_path / "alfa-code.failed")
+
+
 # ── the CLI ───────────────────────────────────────────────────────────────────────────────
 class _Context(object):
     def __init__(self, page):
@@ -259,6 +391,58 @@ def test_cli_is_silent_without_the_code_screen(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr()
     assert "UNLOCK" not in out.out
     assert page.writes == []
+
+
+def test_cli_clear_code_failure_removes_the_marker(tmp_path, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise AssertionError("--clear-code-failure must not need a browser")
+
+    monkeypatch.setattr(cli, "connect", boom)
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    unlock.write_attempt_failure(marker, "проверка")
+
+    code = cli.main(["--clear-code-failure", "--code-file", code_path])
+    out = capsys.readouterr()
+    assert code == cli.EXIT_OK
+    assert out.out.strip() == "UNLOCK: маркер неудачной попытки снят (%s)" % marker
+    assert not os.path.exists(marker)
+
+
+def test_cli_clear_code_failure_without_a_marker(tmp_path, monkeypatch, capsys):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    code = cli.main(["--clear-code-failure", "--code-file", code_path])
+    out = capsys.readouterr()
+    assert code == cli.EXIT_OK
+    assert out.out.strip() == "UNLOCK: маркера нет (%s)" % marker
+
+
+def test_cli_is_silent_and_the_code_stays_out_after_a_failed_entry(tmp_path, monkeypatch, capsys):
+    page = screen_page()
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+
+    run_cli(monkeypatch, page, tmp_path, code_path)
+    out = capsys.readouterr()
+    assert CODE not in out.out and CODE not in out.err
+    assert os.path.exists(marker)
+    with open(marker, encoding="utf-8") as handle:
+        content = handle.read()
+    assert CODE not in content
+
+
+def test_cli_does_not_type_while_the_marker_is_there(tmp_path, monkeypatch, capsys):
+    code_path = write_code(tmp_path)
+    marker = unlock.attempt_marker_path(code_path)
+    unlock.write_attempt_failure(marker, "проверка")
+
+    page = screen_page()
+    run_cli(monkeypatch, page, tmp_path, code_path)
+    out = capsys.readouterr()
+    assert page.writes == []
+    assert marker in out.out
+    assert CODE not in out.out and CODE not in out.err
 
 
 # ── the shipped profile ──────────────────────────────────────────────────────────────────

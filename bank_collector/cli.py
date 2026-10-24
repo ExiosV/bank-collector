@@ -16,7 +16,9 @@ the cabinet's static "secret code" screen (not an SMS code) — the permanent
 cabinet code, which is read from a file of mode 0600 outside the repository
 and is never printed, logged or passed on the command line. Even then the
 tool types at most one code per run and refuses to type at all when the
-screen says that too few attempts are left.
+screen says that too few attempts are left. A failed entry leaves a marker
+file next to the code; the next run refuses to type anything until the
+owner removes it with ``--clear-code-failure``.
 """
 
 import argparse
@@ -30,7 +32,12 @@ from .collect import DEFAULT_TIMEOUT_MS, collect
 from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
-from .unlock import DEFAULT_UNLOCK_TIMEOUT_MS, handle_code_screen
+from .unlock import (
+    DEFAULT_UNLOCK_TIMEOUT_MS,
+    attempt_marker_path,
+    clear_attempt_failure,
+    handle_code_screen,
+)
 
 __all__ = ["main", "build_parser"]
 
@@ -42,6 +49,10 @@ EXIT_NOTHING = 4
 #: The line that is printed on stdout when the code screen was handled.
 UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
 UNLOCK_FAILED = "UNLOCK: не удалось (%s)"
+
+#: The lines of ``--clear-code-failure``.
+UNLOCK_MARKER_CLEARED = "UNLOCK: маркер неудачной попытки снят (%s)"
+UNLOCK_NO_MARKER = "UNLOCK: маркера нет (%s)"
 
 
 def build_parser():
@@ -87,6 +98,14 @@ def build_parser():
         help=(
             "file with the cabinet's static code (mode 0600, outside the repository). "
             "Without --enter-code it is ignored (a warning is printed)."
+        ),
+    )
+    parser.add_argument(
+        "--clear-code-failure",
+        action="store_true",
+        help=(
+            "remove the marker of a failed code entry (the file next to the code file), "
+            "so that the next run may try again; needs no browser and types nothing"
         ),
     )
     parser.add_argument(
@@ -255,6 +274,38 @@ def _unlock(page, profile, args):
     return None
 
 
+def _marker_path_for(args):
+    """The "one strike" marker that belongs to the code file of this run."""
+    code_file = args.code_file
+    if not code_file and args.bank:
+        try:
+            profile = load_profile(args.bank)
+        except ProfileError:
+            profile = None
+        if profile:
+            code_file = (profile.get("unlock") or {}).get("code_file")
+    return attempt_marker_path(code_file)
+
+
+def _clear_code_failure(args):
+    """Remove the marker of a failed code entry.
+
+    Nothing is typed and no browser is needed: the marker file is removed
+    and one line is printed.
+    """
+    marker = _marker_path_for(args)
+    try:
+        removed = clear_attempt_failure(marker)
+    except OSError as exc:
+        sys.stderr.write("unlock error: cannot remove the marker %s: %s\n" % (marker, exc))
+        return EXIT_BAD_PROFILE
+    if removed:
+        sys.stdout.write("%s\n" % (UNLOCK_MARKER_CLEARED % marker))
+    else:
+        sys.stdout.write("%s\n" % (UNLOCK_NO_MARKER % marker))
+    return EXIT_OK
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -262,6 +313,10 @@ def main(argv=None):
     if args.list_profiles:
         _print_profiles()
         return EXIT_OK
+
+    if args.clear_code_failure:
+        # Works without a browser, without a bank and without typing anything.
+        return _clear_code_failure(args)
 
     if not args.bank:
         parser.error("--bank is required (or use --list-profiles)")

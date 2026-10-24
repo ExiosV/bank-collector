@@ -45,6 +45,10 @@ class FakeElement(object):
         self.parent = parent
         self.children = []
         self._text_parts = []
+        #: Everything a test wrote into this element, in order: ("fill", value)
+        #: or ("click", None).  The real page has no such bookkeeping; it is
+        #: here so that the unlock tests can prove that nothing else is tapped.
+        self.writes = []
 
     # -- tree ------------------------------------------------------------
     def append_child(self, child):
@@ -70,6 +74,16 @@ class FakeElement(object):
         for child in self.children:
             parts.append(child.text_content())
         return "".join(parts)
+
+    # -- the two write primitives (used only by bank_collector.unlock) ----
+    def fill(self, value):
+        self.writes.append(("fill", value))
+        self.attrs["value"] = value
+        return None
+
+    def click(self):
+        self.writes.append(("click", None))
+        return None
 
     def get_attribute(self, name):
         return self.attrs.get(name)
@@ -423,6 +437,14 @@ class FakePage(object):
 
     def query_all(self, selector):
         return self.root.query_all(selector)
+
+    @property
+    def writes(self):
+        """Every write action recorded on the current document, in order."""
+        collected = list(getattr(self.root, "writes", []))
+        for element in self.root.iter_descendants():
+            collected.extend(getattr(element, "writes", []))
+        return collected
 
     def content(self):
         return self.html

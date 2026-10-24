@@ -8,6 +8,7 @@ PyYAML we ship a tiny parser that understands the subset we actually use:
   * block sequences (``- item``)
   * nested blocks, scalars (str/int/float/bool/null)
   * single/double quoted scalars, inline comments
+  * flow sequences of scalars (``[a, b]``) — one level, no nesting
 
 If PyYAML happens to be installed it is used instead (see ``bank_collector.profiles``);
 the two parsers are checked against each other in the test-suite.
@@ -15,7 +16,7 @@ the two parsers are checked against each other in the test-suite.
 
 import re
 
-__all__ = ["safe_load", "YamlError"]
+__all__ = ["safe_load", "load", "YamlError"]
 
 
 class YamlError(ValueError):
@@ -155,10 +156,43 @@ class _Parser(object):
         return items
 
 
+def _split_flow_items(body):
+    """Split the body of a flow sequence on its commas (quotes respected)."""
+    items = []
+    current = []
+    quote = None
+    for char in body:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            continue
+        if char == ",":
+            items.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    tail = "".join(current)
+    if tail.strip():
+        items.append(tail)
+    return [item.strip() for item in items if item.strip()]
+
+
+def _flow_sequence(text, line=0):
+    """Parse ``[a, b]`` into a list of scalars."""
+    return [_scalar(item, line) for item in _split_flow_items(text[1:-1])]
+
+
 def _scalar(text, line=0):
     text = text.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
         return text[1:-1]
+    if len(text) >= 2 and text[0] == "[" and text[-1] == "]":
+        return _flow_sequence(text, line)
     low = text.lower()
     if low in ("null", "~", ""):
         return None
@@ -171,3 +205,7 @@ def _scalar(text, line=0):
     if _FLOAT_RE.match(text):
         return float(text)
     return text
+
+
+#: ``load`` is the name PyYAML uses; the alias keeps both APIs interchangeable.
+load = safe_load

@@ -65,6 +65,46 @@ A profile NEVER contains credentials: there is no field for a login, a
 password, an SMS code or a cookie. The validator rejects any unknown key and
 any field whose name looks like a credential, so that such a thing cannot be
 smuggled in unnoticed.
+
+An optional ``unlock`` section describes the cabinet's static "secret code"
+screen (not an SMS code) so that ``--enter-code`` can recognise it::
+
+    unlock:
+      markers: ["секретный код"]   # phrases that betray the screen
+      submit_text: ["Вперёд"]      # label of the submit button
+      input_selector: 'input[type=password]'  # optional: exact field
+      success_wait: "#dashboard"   # appears once the cabinet opened
+      code_file: "~/.config/bank-collector/alfa-code"  # where the code lives
+      max_attempts: 1              # entries per run (>= 1)
+      min_attempts_left: 3         # refuse below this many tries left
+      status: unverified           # the screen markup was never observed
+
+The section never holds the code itself — only the way to recognise the
+screen and the path of the file the code is read from (mode 0600, outside
+the repository).  It is used only when the collector is run with
+``--enter-code``.
+
+The keys of the section and what the validator accepts:
+
+``markers``
+    list of non-empty strings — the phrases that betray the screen. A plain
+    string is accepted as a one-element list.
+``submit_text``
+    list of non-empty strings — the labels of the submit button.
+``input_selector``
+    optional CSS selector of the code field. When it is given it wins over
+    the heuristic of ``bank_collector.unlock``.
+``success_wait``
+    optional CSS selector that appears once the cabinet opened.
+``code_file``
+    optional path of the file the code is read from (``~`` is expanded).
+``max_attempts``
+    optional positive integer — how many codes may be entered in one run.
+``min_attempts_left``
+    optional non-negative integer — below this many attempts left on the
+    screen nothing is typed at all.
+``status``
+    optional, ``verified`` or ``unverified`` like the status of the profile.
 """
 
 import os
@@ -84,8 +124,23 @@ VALID_STATUSES = ("verified", "unverified")
 
 _REQUIRED_KEYS = ("bank", "status", "url", "wait_for")
 _OPTIONAL_KEYS = ("balances", "transactions")
-_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes",)
+_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes", "unlock")
 _FIELD_KEYS = ("selector", "attr", "regex", "group")
+
+# The keys the optional ``unlock`` section may carry.  It describes how the
+# cabinet's static "secret code" screen is recognised — it never carries the
+# code itself, only the markers, the button label and the path of the file
+# the code is read from.
+_UNLOCK_KEYS = (
+    "markers",
+    "submit_text",
+    "input_selector",
+    "success_wait",
+    "code_file",
+    "max_attempts",
+    "min_attempts_left",
+    "status",
+)
 
 # The keys a record (one entry of ``balances``/``transactions``) may carry.
 _RECORD_KEYS = ("row", "fields", "url", "wait_for", "items")
@@ -346,6 +401,99 @@ def _normalise_record(index, record, section, where):
     }
 
 
+def _normalise_unlock(section, where):
+    """Validate the optional ``unlock`` section of a profile.
+
+    The section only *describes* the cabinet's static "secret code" screen:
+    the phrases that betray it, the label of the submit button, the selector
+    that shows the cabinet opened and the path of the file the code is read
+    from.  The code itself is never part of a profile — it lives in a file
+    outside the repository (mode 0600) or in an environment variable.
+    """
+    if not isinstance(section, dict):
+        raise ProfileError("%s: 'unlock' must be a mapping" % where)
+
+    unknown = sorted(set(section) - set(_UNLOCK_KEYS))
+    if unknown:
+        raise ProfileError(
+            "%s: 'unlock' has unknown key(s) %s (allowed: %s)"
+            % (where, ", ".join(unknown), ", ".join(_UNLOCK_KEYS))
+        )
+
+    def _string_list(key):
+        value = section.get(key)
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or not value:
+            raise ProfileError(
+                "%s: 'unlock.%s' must be a non-empty list of non-empty strings" % (where, key)
+            )
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ProfileError(
+                    "%s: 'unlock.%s' must be a non-empty list of non-empty strings" % (where, key)
+                )
+        return [item.strip() for item in value]
+
+    markers = _string_list("markers")
+    submit_text = _string_list("submit_text")
+
+    input_selector = section.get("input_selector")
+    if input_selector is not None and (
+        not isinstance(input_selector, str) or not input_selector.strip()
+    ):
+        raise ProfileError("%s: 'unlock.input_selector' must be a non-empty CSS selector" % where)
+
+    success_wait = section.get("success_wait")
+    if success_wait is not None and (
+        not isinstance(success_wait, str) or not success_wait.strip()
+    ):
+        raise ProfileError("%s: 'unlock.success_wait' must be a non-empty CSS selector" % where)
+
+    code_file = section.get("code_file")
+    if code_file is not None and (not isinstance(code_file, str) or not code_file.strip()):
+        raise ProfileError("%s: 'unlock.code_file' must be a non-empty path" % where)
+
+    max_attempts = section.get("max_attempts")
+    if max_attempts is not None:
+        if not isinstance(max_attempts, int) or isinstance(max_attempts, bool):
+            raise ProfileError("%s: 'unlock.max_attempts' must be an integer" % where)
+        if max_attempts < 1:
+            raise ProfileError(
+                "%s: 'unlock.max_attempts' must be a positive integer (got %r)" % (where, max_attempts)
+            )
+
+    min_attempts_left = section.get("min_attempts_left")
+    if min_attempts_left is not None:
+        if not isinstance(min_attempts_left, int) or isinstance(min_attempts_left, bool):
+            raise ProfileError("%s: 'unlock.min_attempts_left' must be an integer" % where)
+        if min_attempts_left < 0:
+            raise ProfileError(
+                "%s: 'unlock.min_attempts_left' must not be negative (got %r)"
+                % (where, min_attempts_left)
+            )
+
+    status = section.get("status")
+    if status is not None and status not in VALID_STATUSES:
+        raise ProfileError(
+            "%s: 'unlock.status' must be one of %s (got %r)"
+            % (where, ", ".join(VALID_STATUSES), status)
+        )
+
+    return {
+        "markers": markers,
+        "submit_text": submit_text,
+        "input_selector": input_selector,
+        "success_wait": success_wait,
+        "code_file": code_file,
+        "max_attempts": max_attempts,
+        "min_attempts_left": min_attempts_left,
+        "status": status,
+    }
+
+
 def _validate(data, path):
     where = os.path.basename(path)
 
@@ -403,6 +551,9 @@ def _validate(data, path):
     notes = data.get("notes")
     if notes is not None and not isinstance(notes, str):
         raise ProfileError("%s: 'notes' must be a string" % where)
+
+    if "unlock" in data:
+        data["unlock"] = _normalise_unlock(data["unlock"], where)
 
     return data
 

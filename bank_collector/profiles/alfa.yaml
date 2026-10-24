@@ -7,10 +7,7 @@
 # transactions contain what the first screen of /history/ shows.
 bank: alfa
 status: verified
-notes: >-
-  Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the first page of
-  /history/ only (no scrolling, no pagination, no statement download). The "common balance"
-  widget is not the sum of the product cards, so the profile reads the cards and ignores it.
+notes: "Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the first page of /history/ only (no scrolling, no pagination, no statement download). The 'common balance' widget is not the sum of the product cards, so the profile reads the cards and ignores it."
 url: "https://web.alfabank.ru/dashboard/"
 wait_for: "[data-test-id=common-balance-button]"
 
@@ -39,3 +36,24 @@ transactions:
           selector: "[data-test-id=transaction-category-name]"
         amount:
           selector: "[data-test-id=transaction-status]"
+
+# The cabinet's static "secret code" screen (NOT an SMS code): after a long
+# absence Alfa asks for the permanent cabinet code it already knows. The
+# selectors below were taken from the live screen on 2026-10-24
+# (private.auth.alfabank.ru/passport/cerberus-mini/dashboard/pincode), but
+# the end-to-end entry is NOT proven yet: no code was typed on purpose
+# (the screen showed "Осталось 2 попытки"), so only the markup is verified.
+# The section is used solely by `bank-collector --enter-code`; the code itself
+# lives in the file named by `code_file` (mode 0600, outside the repository).
+unlock:
+  markers: ["секретный код"]
+  submit_text: ["Вперёд"]
+  # The live screen (2026-10-24) has exactly one password field inside this
+  # form.  The selector avoids spaces inside the quotes on purpose: the
+  # stdlib test doubles split selectors on whitespace.
+  input_selector: 'form[class*="pincode-browser_form"] input[type="password"]'
+  success_wait: "[data-test-id=common-balance-button]"
+  code_file: "~/.config/bank-collector/alfa-code"
+  max_attempts: 1
+  min_attempts_left: 3
+  status: verified

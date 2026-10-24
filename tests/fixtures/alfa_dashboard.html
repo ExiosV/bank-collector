@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture for the `alfa` profile. It is NOT a real Alfa-Bank page:
+  every name, account and amount below is invented, and the numbers are fake.
+  The file only reproduces the nesting the profile's selectors rely on:
+    section[data-test-id="product-view-component-*"]
+      button[data-test-id="product-view-content-*"]
+        div > div > p                            <- the product name
+        div[data-test-id="product-view-amount"]  <- the balance
+  One advertising block without a balance is included on purpose: the profile
+  must skip it.
+-->
+<html lang="ru">
+<body>
+<div data-test-id="common-balance-button">
+  <div data-test-id="common-balance-button-content">
+    <div data-test-id="common-balance-button-core-amount-title">17 000,00 ₽</div>
+  </div>
+</div>
+
+<section data-test-id="product-view-component-40817810000000000001">
+  <button data-test-id="product-view-content-40817810000000000001">
+    <div>
+      <div>
+        <p>Карта «Пример»</p>
+      </div>
+    </div>
+    <div data-test-id="product-view-amount"><span>12 000,00 ₽</span></div>
+  </button>
+</section>
+
+<section data-test-id="product-view-component-40817810000000000002">
+  <button data-test-id="product-view-content-40817810000000000002">
+    <div>
+      <div>
+        <p>Счёт «Пример» на минимальный остаток</p>
+      </div>
+    </div>
+    <div data-test-id="product-view-amount"><span>0,00 ₽</span></div>
+  </button>
+</section>
+
+<section data-test-id="product-view-component-40817810000000000003">
+  <button data-test-id="product-view-content-40817810000000000003">
+    <div>
+      <div>
+        <p>Текущий счёт BYN</p>
+      </div>
+    </div>
+    <div data-test-id="product-view-amount"><span>1,00 BYN</span></div>
+  </button>
+</section>
+
+<section data-test-id="product-view-component-40817810000000000004">
+  <button data-test-id="product-view-content-40817810000000000004">
+    <div>
+      <div>
+        <p>Брокерский счёт 0000000-000</p>
+      </div>
+    </div>
+    <div data-test-id="product-view-amount"><span>5 000,00 ₽</span></div>
+  </button>
+</section>
+
+<!-- Advertising block: no product-view-amount, so the profile must skip it. -->
+<section data-test-id="product-view-component-GB_10000000001">
+  <button data-test-id="product-view-content-GB_10000000001">
+    <div>
+      <div>
+        <p>Кэшбэк от «Пример» Only</p>
+      </div>
+    </div>
+    <div><span>7% в категориях</span></div>
+  </button>
+</section>
+</body>
+</html>

@@ -13,11 +13,16 @@ Rules of this module:
 __all__ = [
     "DEFAULT_CDP_URL",
     "BrowserUnavailable",
+    "PageAdapter",
+    "ElementAdapter",
     "connect",
     "available_browsers",
 ]
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+
+# Navigation is the only slow part: an SPA cabinet can take a while to answer.
+GOTO_TIMEOUT_MS = 60000
 
 _HINT = (
     "Start the browser yourself with the debugging port enabled, e.g.\n"
@@ -71,3 +76,53 @@ def connect(cdp_url=DEFAULT_CDP_URL, timeout_ms=15000):
             "Could not attach to a browser at %s.\n%s\n\nOriginal error: %s" % (cdp_url, _HINT, exc)
         ) from exc
     return playwright, browser
+
+
+class ElementAdapter(object):
+    """Adapt a Playwright element handle to the protocol of ``collect``."""
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    def query_all(self, selector):
+        return [ElementAdapter(child) for child in self._handle.query_selector_all(selector)]
+
+    def text_content(self):
+        return self._handle.text_content()
+
+    def get_attribute(self, name):
+        return self._handle.get_attribute(name)
+
+
+class PageAdapter(object):
+    """Adapt a Playwright page to the protocol of ``collect``.
+
+    The driver only needs ``goto``, ``wait_for_selector``, ``query_all`` and
+    the two snapshot helpers; wrapping the page here keeps the driver free of
+    any Playwright import, so it stays testable without a browser.
+    """
+
+    def __init__(self, page, timeout_ms=GOTO_TIMEOUT_MS):
+        self._page = page
+        self._timeout_ms = timeout_ms
+
+    # -- what the driver uses -------------------------------------------
+    @property
+    def url(self):
+        return self._page.url
+
+    def goto(self, url):
+        return self._page.goto(url, wait_until="domcontentloaded", timeout=self._timeout_ms)
+
+    def wait_for_selector(self, selector, timeout=None):
+        return self._page.wait_for_selector(selector, timeout=timeout or self._timeout_ms)
+
+    def query_all(self, selector):
+        return [ElementAdapter(handle) for handle in self._page.query_selector_all(selector)]
+
+    # -- snapshots -------------------------------------------------------
+    def content(self):
+        return self._page.content()
+
+    def inner_text(self, selector="body"):
+        return self._page.inner_text(selector)

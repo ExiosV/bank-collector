@@ -24,12 +24,18 @@ def test_example_profile_is_valid():
     assert profile["balances"] and profile["transactions"]
 
 
-def test_alfa_profile_is_marked_unverified():
+def test_alfa_profile_is_verified_and_split_across_two_pages():
     profile = load_profile("alfa")
     assert profile["bank"] == "alfa"
-    assert profile["status"] == "unverified"
-    # The selectors are still placeholders — the profile is not usable yet.
-    assert "TODO" in profile["transactions"][0]["fields"]["amount"]["selector"]
+    assert profile["status"] == "verified"
+    # Balances come from the dashboard, the statement lives on /history/.
+    assert profile["url"].endswith("/dashboard/")
+    record = profile["transactions"][0]
+    assert record["url"].endswith("/history/")
+    # Operations are grouped by day: the date sits on the group, not on the row.
+    assert record["fields"]["date"]["attr"] == "data-date"
+    assert record["items"]["row"] == "button[data-test-id=operation-cell]"
+    assert set(record["items"]["fields"]) == {"title", "category", "amount"}
 
 
 def test_profiles_are_listed():
@@ -38,7 +44,7 @@ def test_profiles_are_listed():
     assert "alfa" in names
 
     alfa = [entry for entry in list_profiles() if entry["name"] == "alfa"][0]
-    assert alfa["status"] == "unverified"
+    assert alfa["status"] == "verified"
 
 
 def test_missing_profile_raises():

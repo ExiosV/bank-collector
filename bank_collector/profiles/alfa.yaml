@@ -1,38 +1,38 @@
-# Alfa-Bank — UNVERIFIED profile.
+# Alfa-Bank (web.alfabank.ru) — read-only profile, checked against the live
+# cabinet on 2026-10-24 for a desktop Chrome session.
 #
-# TODO: the selectors below are placeholders. They have NOT been checked
-# against the live Alfa-Bank page, nobody has run this profile yet.
-# Fill them in yourself after inspecting the page you are already logged
-# into — see docs/ADD_A_BANK.md — and flip `status` to `verified` only once
-# the extracted numbers match what the page shows.
-#
-# This file intentionally contains no login, no password, no cookie and no
-# SMS-code handling: the tool only reads a page you opened yourself.
+# Two pages: the dashboard holds the product balances, /history/ holds the
+# operations. Only the already rendered page is read: the collector does not
+# scroll, does not press "Скачать выписку" and does not paginate, so
+# transactions contain what the first screen of /history/ shows.
 bank: alfa
-status: unverified
+status: verified
+notes: "Checked on 2026-10-24 against a desktop Chrome session; the dashboard and the first page of /history/ only, no scrolling and no statement download."
 url: "https://web.alfabank.ru/dashboard/"
-
-# TODO: replace with the selector of the element that only appears when the
-# overview has finished rendering.
-wait_for: "TODO-alfa-overview-ready-selector"
+wait_for: "[data-test-id=common-balance-button]"
 
 balances:
-  - row: "TODO-alfa-balance-card-selector"
+  - row: "section[data-test-id^=product-view-component-]:has([data-test-id=product-view-amount])"
     fields:
-      account:
-        selector: "TODO-alfa-balance-account-selector"
+      product:
+        selector: "p"
       amount:
-        # TODO: check whether the amount is inside the card or in a
-        # separate popup; `regex`/`group` are only needed if the number is
-        # mixed with other text.
-        selector: "TODO-alfa-balance-amount-selector"
+        selector: "[data-test-id=product-view-amount]"
 
 transactions:
-  - row: "TODO-alfa-transaction-row-selector"
+  - url: "https://web.alfabank.ru/history/"
+    wait_for: "[data-test-id=operation-cell]"
+    row: "div:has(> [data-date]):has(> button[data-test-id=operation-cell])"
     fields:
       date:
-        selector: "TODO-alfa-transaction-date-selector"
-      amount:
-        selector: "TODO-alfa-transaction-amount-selector"
-      payee:
-        selector: "TODO-alfa-transaction-payee-selector"
+        selector: "[data-date]"
+        attr: "data-date"
+    items:
+      row: "button[data-test-id=operation-cell]"
+      fields:
+        title:
+          selector: "[data-test-id=title-text_content]"
+        category:
+          selector: "[data-test-id=transaction-category-name]"
+        amount:
+          selector: "[data-test-id=transaction-status]"

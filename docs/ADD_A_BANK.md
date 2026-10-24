@@ -63,6 +63,60 @@ transactions:
   строке. Ничего не додумывается.
 - Валидатор отклоняет профили с полями вида `password`, `token`, `cookie`, `sms` — инструмент не
   работает с секретами, и профиль не место, чтобы их протащить.
+- `row` — обычный CSS, но с двумя оговорками, которые сильно помогают:
+  - `:has(...)` работает и очень выручает, когда признак лежит не в самой строке, а рядом:
+    `section[data-test-id^=product-view-component-]:has([data-test-id=product-view-amount])`
+    берёт только настоящие продукты, пропуская рекламные блоки без суммы. Вложенность допустима:
+    `div:has(> [data-date]):has(> button[data-test-id=operation-cell])`.
+  - якорем лучше брать `[data-test-id=...]` / `[data-qa=...]`, а не хешированные классы вида
+    `.sc-1x2y3z` — они меняются на каждом релизе фронтенда.
+
+### Если остатки и операции на разных страницах
+
+Раздел может попросить свою страницу: `url` и `wait_for` внутри записи переопределяют адрес
+профиля. Драйвер откроет её сам и запишет в `source_urls`.
+
+```yaml
+url: "https://mybank.example/dashboard/"
+wait_for: "[data-testid=dashboard]"
+
+balances:
+  - row: "[data-testid=account-card]"
+    fields: { ... }
+
+transactions:
+  - url: "https://mybank.example/history/"
+    wait_for: "[data-testid=operation-row]"
+    row: "[data-testid=operation-row]"
+    fields: { ... }
+```
+
+### Если операции сгруппированы по дням
+
+Частая картина: дата стоит один раз на группу, а внутри группы несколько операций (так делает
+Альфа). Тогда у записи есть `items` — строки внутри строки. Поля группы и поля операции
+склеиваются в одну строку отчёта; если имя поля есть и там и там, побеждает операция и в
+`warnings` появляется предупреждение.
+
+```yaml
+transactions:
+  - url: "https://mybank.example/history/"
+    row: "div:has(> [data-date])"          # группа = день
+    fields:
+      date:
+        selector: "[data-date]"
+        attr: "data-date"                  # берём атрибут, а не текст
+    items:
+      row: "button[data-test-id=operation-cell]"
+      fields:
+        title:
+          selector: "[data-test-id=title-text_content]"
+        amount:
+          selector: "[data-test-id=transaction-status]"
+```
+
+В `items` нельзя вкладывать ещё `items` (валидатор отклонит): если у банка три уровня, это повод
+сделать профиль проще, а не движок сложнее.
 
 ## 4. Добавьте фикстуру и тест
 

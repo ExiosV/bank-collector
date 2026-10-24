@@ -87,6 +87,10 @@ def test_money_parsing_keeps_sign_and_raw():
         ("1 234.56", "1234.56", None),
         ("−1 234,56", "-1234.56", None),
         ("1\u00a0234,56 ₽", "1234.56", "RUB"),
+        # Alfa-Bank writes "+84\u205f000,00\u2009₽": MEDIUM MATHEMATICAL
+        # SPACE between the thousands and THIN SPACE before the currency.
+        ("+84\u205f000,00\u2009₽", "84000.00", "RUB"),
+        ("-908\u205f456,22\u2009₽", "-908456.22", "RUB"),
         ("+1 234,56", "1234.56", None),
     ):
         value, currency = parse_money(text)

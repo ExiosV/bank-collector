@@ -30,7 +30,7 @@ Canonical form::
 ``transactions`` are optional, but at least one of them must be there.
 
 A record (one entry of ``balances`` or ``transactions``) accepts the keys
-``row``, ``fields``, ``url``, ``wait_for`` and ``items``:
+``row``, ``fields``, ``url``, ``wait_for``, ``items`` and ``scroll``:
 
 ``row``
     CSS selector of the repeating container. Optional — without it the whole
@@ -51,6 +51,23 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
     *inside* every ``row`` of the group. The fields of the group and of the
     item are merged into one output row — used when the operations of a day
     are grouped under a shared date. ``items`` inside ``items`` is rejected.
+``scroll``
+    Optional: how far and how long to scroll the rendered list, so that the
+    rows a cabinet appends while the list is scrolled are read as well.
+    Scrolling is read-only — it moves the viewport, it clicks nothing and it
+    sends no request of our own.  It is only allowed on a record that has a
+    ``row`` (without rows there is nothing to count)::
+
+        scroll:
+          max_rounds: 200          # hard cap on scroll steps, int >= 1, default 50
+          step_px: 1200            # pixels per step, int >= 100, default 1500
+          settle_ms: 900           # wait after each step for the SPA to append rows, int >= 0, default 800
+          stop_after_empty_rounds: 4   # stop after N consecutive rounds with no new rows, int >= 1, default 3
+          stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated on/before it is seen
+
+    The driver stops when the list stops growing, when a row is dated on or
+    before ``stop_before_date`` or when ``max_rounds`` is reached (the last
+    case is reported as a warning).
 
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
@@ -143,7 +160,37 @@ _UNLOCK_KEYS = (
 )
 
 # The keys a record (one entry of ``balances``/``transactions``) may carry.
-_RECORD_KEYS = ("row", "fields", "url", "wait_for", "items")
+_RECORD_KEYS = ("row", "fields", "url", "wait_for", "items", "scroll")
+
+# The keys the optional ``scroll`` block of a record may carry.  It says how
+# far and how long to scroll the rendered list — never what to click.
+_SCROLL_KEYS = (
+    "max_rounds",
+    "step_px",
+    "settle_ms",
+    "stop_after_empty_rounds",
+    "stop_before_date",
+)
+
+#: The values used when the profile does not say otherwise.
+_SCROLL_DEFAULTS = {
+    "max_rounds": 50,
+    "step_px": 1500,
+    "settle_ms": 800,
+    "stop_after_empty_rounds": 3,
+    "stop_before_date": None,
+}
+
+#: The smallest value each numeric key may have.
+_SCROLL_MINIMUMS = {
+    "max_rounds": 1,
+    "step_px": 100,
+    "settle_ms": 0,
+    "stop_after_empty_rounds": 1,
+}
+
+#: The only date format the profile accepts (``stop_before_date``).
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # A profile describes *what to read*, never *how to log in*. Any field whose
 # name looks like a credential is rejected outright, so that a login, a
@@ -323,6 +370,67 @@ def _normalise_items(index, items, where):
     return {"row": row, "fields": fields}
 
 
+def _normalise_scroll(index, scroll, where):
+    """Validate the optional ``scroll`` block of a record.
+
+    The block says how far and how long the driver scrolls the rendered
+    list.  It never describes *what* to click: there is nothing to click —
+    scrolling only moves the viewport.
+    """
+    if not isinstance(scroll, dict):
+        raise ProfileError("%s: record #%d: 'scroll' must be a mapping" % (where, index))
+
+    unknown = sorted(set(scroll) - set(_SCROLL_KEYS))
+    if unknown:
+        raise ProfileError(
+            "%s: record #%d: 'scroll' has unknown key(s) %s (allowed: %s)"
+            % (where, index, ", ".join(unknown), ", ".join(_SCROLL_KEYS))
+        )
+
+    result = dict(_SCROLL_DEFAULTS)
+
+    for key, minimum in _SCROLL_MINIMUMS.items():
+        value = scroll.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ProfileError(
+                "%s: record #%d: 'scroll.%s' must be an integer" % (where, index, key)
+            )
+        if value < minimum:
+            raise ProfileError(
+                "%s: record #%d: 'scroll.%s' must be >= %d (got %r)"
+                % (where, index, key, minimum, value)
+            )
+        result[key] = value
+
+    stop_before = scroll.get("stop_before_date")
+    if stop_before is not None:
+        result["stop_before_date"] = _check_stop_date(index, stop_before, where)
+
+    return result
+
+
+def _check_stop_date(index, value, where):
+    """Validate a ``YYYY-MM-DD`` date (and return it untouched)."""
+    if not isinstance(value, str) or not _DATE_RE.match(value.strip()):
+        raise ProfileError(
+            "%s: record #%d: 'scroll.stop_before_date' must be a YYYY-MM-DD date (got %r)"
+            % (where, index, value)
+        )
+    text = value.strip()
+    from datetime import date
+
+    try:
+        date(int(text[0:4]), int(text[5:7]), int(text[8:10]))
+    except ValueError:
+        raise ProfileError(
+            "%s: record #%d: 'scroll.stop_before_date' is not a real date (%r)"
+            % (where, index, value)
+        )
+    return text
+
+
 def _normalise_record(index, record, section, where):
     if not isinstance(record, dict):
         raise ProfileError("%s: record #%d must be a mapping" % (where, index))
@@ -330,6 +438,7 @@ def _normalise_record(index, record, section, where):
     url = None
     wait_for = None
     items = None
+    scroll = None
 
     if "fields" in record:
         unknown = sorted(set(record) - set(_RECORD_KEYS))
@@ -344,6 +453,7 @@ def _normalise_record(index, record, section, where):
         url = record.get("url")
         wait_for = record.get("wait_for")
         items = record.get("items")
+        scroll = record.get("scroll")
     else:
         # The "flat" sugar form: the fields sit directly under the record. A
         # field may be named "url"/"wait_for" as long as its value is a
@@ -356,6 +466,10 @@ def _normalise_record(index, record, section, where):
             value = record["items"]
             if isinstance(value, dict) and "selector" not in value:
                 reserved.add("items")
+        if "scroll" in record:
+            value = record["scroll"]
+            if isinstance(value, dict) and "selector" not in value:
+                reserved.add("scroll")
         fields = {}
         for key, value in record.items():
             if key == "row" or key in reserved:
@@ -364,6 +478,7 @@ def _normalise_record(index, record, section, where):
         url = record.get("url") if "url" in reserved else None
         wait_for = record.get("wait_for") if "wait_for" in reserved else None
         items = record.get("items") if "items" in reserved else None
+        scroll = record.get("scroll") if "scroll" in reserved else None
 
     if not fields:
         raise ProfileError("%s: record #%d has no fields" % (where, index))
@@ -392,12 +507,22 @@ def _normalise_record(index, record, section, where):
     if items is not None:
         normalised_items = _normalise_items(index, items, where)
 
+    normalised_scroll = None
+    if scroll is not None:
+        if row is None:
+            raise ProfileError(
+                "%s: record #%d: 'scroll' needs a 'row' — there must be rows to count"
+                % (where, index)
+            )
+        normalised_scroll = _normalise_scroll(index, scroll, where)
+
     return {
         "row": row,
         "fields": fields,
         "url": url,
         "wait_for": wait_for,
         "items": normalised_items,
+        "scroll": normalised_scroll,
     }
 
 

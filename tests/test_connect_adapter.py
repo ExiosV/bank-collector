@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from bank_collector.collect import collect, extract_section  # noqa: E402
-from bank_collector.connect import PageAdapter  # noqa: E402
+from bank_collector.connect import FrameAdapter, PageAdapter  # noqa: E402
 
 
 class FakeHandle(object):
@@ -37,6 +37,16 @@ class FakeHandle(object):
         return self.attrs.get(name)
 
 
+class FakeMouse(object):
+    """Tracks wheel events so that scroll tests can assert on them."""
+
+    def __init__(self):
+        self.wheels = []
+
+    def wheel(self, dx, dy):
+        self.wheels.append((dx, dy))
+
+
 class FakePlaywrightPage(object):
     """Looks like a Playwright Page, not like the driver's protocol."""
 
@@ -46,6 +56,7 @@ class FakePlaywrightPage(object):
         self.goto_calls = []
         self.waited = []
         self.closed = False
+        self.mouse = FakeMouse()
 
     def goto(self, url, **kwargs):
         self.goto_calls.append((url, kwargs))
@@ -138,3 +149,61 @@ def test_collect_over_the_adapter_reports_the_source_url():
 
     assert result["source_url"] == "https://example.invalid/"
     assert "no balances extracted" in result["warnings"]
+
+
+def test_page_adapter_scroll_by_calls_mouse_wheel():
+    """PageAdapter.scroll_by forwards to the raw page's mouse."""
+    raw = FakePlaywrightPage("https://example.invalid/")
+    adapter = PageAdapter(raw)
+    adapter.scroll_by(1200)
+
+    assert raw.mouse.wheels == [(0, 1200)]
+
+
+def test_frame_adapter_scroll_by_uses_the_frames_page_mouse():
+    """FrameAdapter.scroll_by reaches the page that owns the frame."""
+
+    class FakeFrame(object):
+        @property
+        def url(self):
+            return "https://example.invalid/iframe"
+
+        def query_selector_all(self, selector):
+            return []
+
+        def inner_text(self, selector="body"):
+            return ""
+
+        @property
+        def page(self):
+            return raw
+
+    raw = FakePlaywrightPage("https://example.invalid/")
+    frame = FakeFrame()
+    adapter = PageAdapter(raw)
+    # Get the frame adapter we just made
+    frame_adapter = FrameAdapter(frame)
+    frame_adapter.scroll_by(500)
+
+    assert raw.mouse.wheels == [(0, 500)]
+
+
+def test_frame_with_no_page_is_a_no_op():
+    """A frame without a `.page` attribute does not crash."""
+
+    class FakeFrameNoPage(object):
+        @property
+        def url(self):
+            return "https://example.invalid/iframe"
+
+        def query_selector_all(self, selector):
+            return []
+
+        def inner_text(self, selector="body"):
+            return ""
+
+    frame = FakeFrameNoPage()
+    adapter = FrameAdapter(frame)
+    # Should not raise, should just return None
+    result = adapter.scroll_by(100)
+    assert result is None

@@ -14,6 +14,13 @@ The JSON document is the artefact of this tool::
       "warnings":    [ "..." ]
     }
 
+When the run scrolled the rendered list, the document holds one more key —
+the provenance of that scroll:
+
+    {
+      "scroll": {"rounds": 12, "rows": 143, "stop": "date"}
+    }
+
 Everything is written to the local disk by the caller. Nothing is sent
 anywhere: this module has no network code at all.
 """
@@ -35,7 +42,7 @@ SCHEMA_VERSION = "1"
 
 def build_report(collected, schema_version=SCHEMA_VERSION):
     """Turn the dict returned by :func:`bank_collector.collect.collect` into a report."""
-    return {
+    report = {
         "schema_version": schema_version,
         "bank": collected.get("bank"),
         "status": collected.get("status"),
@@ -46,6 +53,10 @@ def build_report(collected, schema_version=SCHEMA_VERSION):
         "transactions": collected.get("transactions", []),
         "warnings": collected.get("warnings", []),
     }
+    # The provenance of a scrolled run is only there when there was one.
+    if collected.get("scroll"):
+        report["scroll"] = collected["scroll"]
+    return report
 
 
 def write_json(report, path):

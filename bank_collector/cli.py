@@ -22,6 +22,7 @@ owner removes it with ``--clear-code-failure``.
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -120,6 +121,14 @@ def build_parser():
         help="also dump a sanitised HTML/text snapshot of the page (for writing selectors)",
     )
     parser.add_argument(
+        "--no-scroll",
+        action="store_true",
+        help=(
+            "do not scroll the rendered list, even when the profile asks for it "
+            "(the first rendered screen only; nothing else changes)"
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=("json", "csv", "both"),
         default="both",
@@ -206,6 +215,20 @@ def _same_url(left, right):
     if not left or not right:
         return left == right
     return left.rstrip("/") == right.rstrip("/")
+
+
+def _without_scroll(profile):
+    """Return a copy of *profile* whose records have no ``scroll`` block.
+
+    It powers ``--no-scroll``: the run reads the first rendered screen only,
+    exactly as it did before the profiles learned to scroll.
+    """
+    stripped = copy.deepcopy(profile)
+    for section in ("balances", "transactions"):
+        for record in stripped.get(section) or []:
+            if isinstance(record, dict):
+                record.pop("scroll", None)
+    return stripped
 
 
 class _AlreadyOpenPage(object):
@@ -329,6 +352,10 @@ def main(argv=None):
     except ProfileError as exc:
         sys.stderr.write("profile error: %s\n" % exc)
         return EXIT_BAD_PROFILE
+
+    if args.no_scroll:
+        # The defensive switch: read the first rendered screen only.
+        profile = _without_scroll(profile)
 
     try:
         playwright, browser = connect(args.cdp_url, timeout_ms=args.timeout)

@@ -13,11 +13,14 @@ import sys
 
 import pytest
 
+from unittest.mock import patch
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from bank_collector.collect import collect, extract_section  # noqa: E402
 from bank_collector.profiles import ProfileError, load_profile  # noqa: E402
+from bank_collector.profiles import _SCROLL_DEFAULTS, _SCROLL_KEYS, _SCROLL_MINIMUMS  # noqa: E402
 from fake_page import FakePage, parse_html  # noqa: E402
 
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -56,6 +59,21 @@ def browser():
             HISTORY_URL: read_fixture("alfa_history.html"),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Every test that calls `collect` on a scrolled profile must not wait for the
+# settle delay (900 ms by default for Alfa-Bank).  Patch it away so that
+# these tests run fast — and so that the fixture can be autoused without
+# changing existing tests.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_sleep():
+    """Suppress the settle delay of scrolled runs so tests finish fast."""
+    with patch("bank_collector.collect.time.sleep", lambda *a: None):
+        yield
 
 
 def test_alfa_profile_asks_for_two_pages():
@@ -172,3 +190,15 @@ def test_items_cannot_be_nested(tmp_path):
 
     with pytest.raises(ProfileError, match="items"):
         load_from("nested", directory=str(tmp_path))
+
+
+def test_alfa_scroll_block_has_expected_values():
+    """The Alfa-Bank profile must spell out the scroll limits it uses."""
+    profile = load_profile("alfa")
+    scroll = profile["transactions"][0]["scroll"]
+
+    assert scroll["max_rounds"] == 200
+    assert scroll["step_px"] == 1200
+    assert scroll["settle_ms"] == 900
+    assert scroll["stop_after_empty_rounds"] == 4
+    assert scroll["stop_before_date"] == "2026-01-01"

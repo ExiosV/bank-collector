@@ -65,9 +65,13 @@ def build_parser():
         prog="bank-collector",
         description=(
             "Read your own bank cabinet in a browser you already logged into. "
-            "Read-only by default: no login, no credentials, no clicking on anything. "
-            "With --enter-code the cabinet's static 'secret code' screen (not an SMS "
-            "code) is answered once, from a file of mode 0600."
+            "Read-only: no login, no credentials, no fills. There are exactly two "
+            "narrow, explicitly enabled clicks: the history list's own 'load more' "
+            "button — a profile may name it (scroll.load_more_text) together with the "
+            "list container it lives in (scroll.load_more_scope), and it is pressed "
+            "only when scrolling added no rows and exactly one such <button> is inside "
+            "that container — and --enter-code's one answer to the cabinet's static "
+            "'secret code' screen (not an SMS code), from a file of mode 0600."
         ),
         epilog=(
             "Examples:\n"

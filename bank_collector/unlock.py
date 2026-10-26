@@ -14,9 +14,12 @@ recognised.  The rules of this module:
   line, so it never lands in ``ps``, in the shell history or in a log;
 * the code is never logged, never printed, never written into a report, a
   JSON file or an exception message — it is masked as ``***`` everywhere;
-* this is the ONLY place in the whole package that types or clicks: one
-  function, :func:`enter_code`, called only after :func:`detect_code_screen`
-  has recognised the screen.  Nothing else in the code base writes into a
+* this is the only place in the package that *types*: one function,
+  :func:`enter_code`, called only after :func:`detect_code_screen` has
+  recognised the screen.  The only other write in the package is a single
+  click on the history list's own "load more" button, made by
+  ``bank_collector.collect`` inside the container a profile names in
+  ``scroll.load_more_scope``; nothing else in the code base writes into a
   page;
 * no JS is evaluated in the page: everything is read through the small
   protocol of ``bank_collector.collect`` (``query_all``, ``get_attribute``,

@@ -9,6 +9,8 @@ so this module implements the small part of the DOM that
 * ``query_all(selector)``
 * ``content()`` / ``inner_text(selector)``
 * ``scroll_by(dy)`` -- read-only: it only moves the viewport
+* a ``click()`` hook: ``on_click(page, element)`` is called when a test
+  clicks an element, so that a click can grow the DOM like an SPA does
 
 It also ships a small CSS engine, because real bank pages are anchored on
 ``data-test-id`` attributes and nest their rows deeply. The subset supported
@@ -22,6 +24,10 @@ here covers what the shipped profiles use:
   (``div:has(span)``) or a matching direct child (``div:has(> span)``).
   Several ``:has()`` may sit in one compound selector and one may hold
   another one (``div:has(> [data-date]):has(> button)``).
+* ``:not(<inner>)``: the element does NOT match the inner compound selector
+  (``button:not([data-test-id])``). Only a plain compound is supported inside.
+* a selector list separated by commas (``button, [role=button], a``):
+  an element matches when it matches any group.
 
 Only the standard library is used.
 """
@@ -67,8 +73,19 @@ class FakeElement(object):
 
     # -- DOM API used by the collector -----------------------------------
     def query_all(self, selector):
-        steps = _parse_selector(selector)
-        return [node for node in self.iter_descendants() if _matches_steps(node, steps)]
+        groups = [_parse_selector(part) for part in _split_selector_list(selector)]
+        if not groups:
+            return []
+        if len(groups) == 1:
+            steps = groups[0]
+            return [
+                node for node in self.iter_descendants() if _matches_steps(node, steps)
+            ]
+        return [
+            node
+            for node in self.iter_descendants()
+            if any(_matches_steps(node, steps) for steps in groups)
+        ]
 
     def text_content(self):
         parts = list(self._text_parts)
@@ -76,7 +93,8 @@ class FakeElement(object):
             parts.append(child.text_content())
         return "".join(parts)
 
-    # -- the two write primitives (used only by bank_collector.unlock) ----
+    # -- the write primitives (used by bank_collector.unlock and the one
+    #    load-more click of the collector) -------------------------------
     def fill(self, value):
         self.writes.append(("fill", value))
         self.attrs["value"] = value
@@ -84,6 +102,13 @@ class FakeElement(object):
 
     def click(self):
         self.writes.append(("click", None))
+        # A click may change the page: the root carries the page's hook.
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        hook = getattr(root, "click_hook", None)
+        if hook is not None:
+            hook(self)
         return None
 
     def get_attribute(self, name):
@@ -135,9 +160,9 @@ _OP_RE = re.compile(r"\s*(~=|\|=|\^=|\$=|\*=|=)\s*(.*)$", re.S)
 
 
 class _Compound(object):
-    """One compound selector: a tag plus classes, id, attributes and :has()."""
+    """One compound selector: a tag plus classes, id, attributes, :has(), :not()."""
 
-    __slots__ = ("tag", "classes", "ids", "attrs", "has")
+    __slots__ = ("tag", "classes", "ids", "attrs", "has", "nots")
 
     def __init__(self):
         self.tag = None
@@ -145,6 +170,7 @@ class _Compound(object):
         self.ids = []
         self.attrs = []
         self.has = []
+        self.nots = []
 
 
 def _find_closing(text, start, opener, closer):
@@ -231,6 +257,11 @@ def _parse_compound(text):
                 inner = text[index + 1 : after - 1 if text[after - 1 : after] == ")" else after]
                 compound.has.append(_parse_steps(inner))
                 index = after
+            elif name == "not":
+                after = _find_closing(text, index, "(", ")")
+                inner = text[index + 1 : after - 1 if text[after - 1 : after] == ")" else after]
+                compound.nots.append(_parse_steps(inner))
+                index = after
             else:
                 # Unknown pseudo-classes are ignored, like a browser would
                 # ignore an unknown one it cannot match.
@@ -294,6 +325,33 @@ def _parse_steps(text):
 _SELECTOR_CACHE = {}
 
 
+def _split_selector_list(selector):
+    """Split a comma-separated selector list on its top-level commas.
+
+    Commas inside ``[...]``, ``(...)`` or quotes belong to one selector and
+    are left alone.
+    """
+    parts = []
+    depth = 0
+    quote = None
+    start = 0
+    for index, char in enumerate(selector):
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(selector[start:index].strip())
+            start = index + 1
+    parts.append(selector[start:].strip())
+    return [part for part in parts if part]
+
+
 def _parse_selector(selector):
     """Parse (and cache) *selector* into steps."""
     steps = _SELECTOR_CACHE.get(selector)
@@ -344,6 +402,10 @@ def _matches_compound(element, compound):
 
     for inner in compound.has:
         if not _matches_relative(element, inner):
+            return False
+
+    for inner in compound.nots:
+        if _matches_steps(element, inner):
             return False
 
     return True
@@ -417,9 +479,9 @@ def _matches_steps(element, steps):
 class FakePage(object):
     """A stand-in for a Playwright page, backed by a static HTML string."""
 
-    def __init__(self, html, url="https://example.invalid/cabinet", pages=None, on_scroll=None):
-        self.html = html
-        self.root = parse_html(html)
+    def __init__(
+        self, html, url="https://example.invalid/cabinet", pages=None, on_scroll=None, on_click=None
+    ):
         self.url = url
         self.visited = []
         self.waited_for = []
@@ -428,6 +490,18 @@ class FakePage(object):
         self.scrolls = []
         self._pages = list(pages or [])
         self._on_scroll = on_scroll
+        self._on_click = on_click
+        self._set_root(html)
+
+    def _set_root(self, html):
+        """Parse *html* and let every click on the new tree reach the hook."""
+        self.html = html
+        self.root = parse_html(html)
+        self.root.click_hook = self._dispatch_click
+
+    def _dispatch_click(self, element):
+        if self._on_click is not None:
+            self._on_click(self, element)
 
     # -- playwright-like API ---------------------------------------------
     def goto(self, url, **kwargs):
@@ -454,8 +528,7 @@ class FakePage(object):
         """
         self.scrolls.append(("scroll", dy))
         if self._pages:
-            self.html = self._pages.pop(0)
-            self.root = parse_html(self.html)
+            self._set_root(self._pages.pop(0))
         if self._on_scroll is not None:
             self._on_scroll(self)
         return None

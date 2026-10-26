@@ -54,9 +54,9 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
 ``scroll``
     Optional: how far and how long to scroll the rendered list, so that the
     rows a cabinet appends while the list is scrolled are read as well.
-    Scrolling is read-only — it moves the viewport, it clicks nothing and it
-    sends no request of our own.  It is only allowed on a record that has a
-    ``row`` (without rows there is nothing to count)::
+    Scrolling is read-only — it moves the viewport and sends no request of
+    our own.  It is only allowed on a record that has a ``row`` (without rows
+    there is nothing to count)::
 
         scroll:
           max_rounds: 200          # hard cap on scroll steps, int >= 1, default 50
@@ -64,10 +64,28 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
           settle_ms: 900           # wait after each step for the SPA to append rows, int >= 0, default 800
           stop_after_empty_rounds: 4   # stop after N consecutive rounds with no new rows, int >= 1, default 3
           stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated strictly before it is seen
+          load_more_text: "Показать ещё"  # optional: the one "load more" button, default none
+          load_more_scope: "div.list"     # REQUIRED with load_more_text: the list container
+          max_clicks: 100          # cap on clicks of that button, int >= 1, default 100
 
     The driver stops when the list stops growing, when a row is dated strictly
     before ``stop_before_date`` or when ``max_rounds`` is reached (the last
     case is reported as a warning).
+
+    ``load_more_text`` is the single exception to "scrolling never clicks":
+    when scrolling a round added no new rows, the driver looks for buttons
+    whose whole text (stripped, whitespace collapsed) equals the string.  It
+    clicks only when exactly one such button exists, and that click merely
+    asks the list to render its next page.  None or several matches mean no
+    click.  ``max_clicks`` limits how many such clicks one run may make.
+
+    ``load_more_scope`` is a CSS selector of the list container and is
+    **required** whenever ``load_more_text`` is set (and forbidden without
+    it).  At click time only containers that hold at least one row of the
+    record are counted; the scope must match exactly one of them, otherwise
+    nothing is clicked and the run stops with an error.  The button is then
+    searched only inside that container, so a same-label control of another
+    widget (an offers block, a link) can never be pressed.
 
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
@@ -163,14 +181,37 @@ _UNLOCK_KEYS = (
 _RECORD_KEYS = ("row", "fields", "url", "wait_for", "items", "scroll")
 
 # The keys the optional ``scroll`` block of a record may carry.  It says how
-# far and how long to scroll the rendered list — never what to click.
+# far and how long to scroll the rendered list, and names the one "load more"
+# button the driver may press when scrolling added nothing — never any other
+# click.
 _SCROLL_KEYS = (
     "max_rounds",
     "step_px",
     "settle_ms",
     "stop_after_empty_rounds",
     "stop_before_date",
+    "load_more_text",
+    "load_more_scope",
+    "max_clicks",
 )
+
+#: The only labels the driver may ever press.  A profile cannot smuggle in
+#: "Скачать выписку", "Оплатить" or any other button by naming it here: the
+#: label is compared case-insensitively after whitespace collapsing against
+#: this allowlist, and anything else is a profile error.
+_LOAD_MORE_LABELS = (
+    "Показать ещё",
+    "Показать еще",
+    "Загрузить ещё",
+    "Загрузить еще",
+    "Ещё",
+    "Еще",
+    "Show more",
+    "Load more",
+)
+
+#: The allowlist folded for a case-insensitive comparison.
+_LOAD_MORE_LABELS_FOLDED = frozenset(label.casefold() for label in _LOAD_MORE_LABELS)
 
 #: The values used when the profile does not say otherwise.
 _SCROLL_DEFAULTS = {
@@ -179,6 +220,9 @@ _SCROLL_DEFAULTS = {
     "settle_ms": 800,
     "stop_after_empty_rounds": 3,
     "stop_before_date": None,
+    "load_more_text": None,
+    "load_more_scope": None,
+    "max_clicks": 100,
 }
 
 #: The smallest value each numeric key may have.
@@ -187,6 +231,7 @@ _SCROLL_MINIMUMS = {
     "step_px": 100,
     "settle_ms": 0,
     "stop_after_empty_rounds": 1,
+    "max_clicks": 1,
 }
 
 #: The only date format the profile accepts (``stop_before_date``).
@@ -374,8 +419,14 @@ def _normalise_scroll(index, scroll, where):
     """Validate the optional ``scroll`` block of a record.
 
     The block says how far and how long the driver scrolls the rendered
-    list.  It never describes *what* to click: there is nothing to click —
-    scrolling only moves the viewport.
+    list.  ``load_more_text`` names the one button that may be clicked when
+    scrolling added nothing: the text must be a non-empty string from the
+    fixed allowlist (``_LOAD_MORE_LABELS``), and it is compared with the
+    whole text of a button.  ``load_more_scope`` names the list container and
+    is required with ``load_more_text`` (and forbidden without it): the
+    button is searched only there, so a same-label control elsewhere is never
+    pressed.  Everything else stays read-only — scrolling only moves the
+    viewport.
     """
     if not isinstance(scroll, dict):
         raise ProfileError("%s: record #%d: 'scroll' must be a mapping" % (where, index))
@@ -407,6 +458,44 @@ def _normalise_scroll(index, scroll, where):
     stop_before = scroll.get("stop_before_date")
     if stop_before is not None:
         result["stop_before_date"] = _check_stop_date(index, stop_before, where)
+
+    load_more_text = scroll.get("load_more_text")
+    if load_more_text is not None:
+        if not isinstance(load_more_text, str) or not load_more_text.strip():
+            raise ProfileError(
+                "%s: record #%d: 'scroll.load_more_text' must be a non-empty string"
+                % (where, index)
+            )
+        # Compared with the whitespace-collapsed text of a button.
+        collapsed = " ".join(load_more_text.split())
+        if collapsed.casefold() not in _LOAD_MORE_LABELS_FOLDED:
+            raise ProfileError(
+                "%s: record #%d: 'scroll.load_more_text' must be one of the known "
+                "load-more labels (%s), got %r"
+                % (where, index, ", ".join(_LOAD_MORE_LABELS), collapsed)
+            )
+        result["load_more_text"] = collapsed
+
+    load_more_scope = scroll.get("load_more_scope")
+    if load_more_scope is not None:
+        if not isinstance(load_more_scope, str) or not load_more_scope.strip():
+            raise ProfileError(
+                "%s: record #%d: 'scroll.load_more_scope' must be a non-empty CSS selector"
+                % (where, index)
+            )
+        result["load_more_scope"] = load_more_scope.strip()
+
+    if result["load_more_text"] is not None and result["load_more_scope"] is None:
+        raise ProfileError(
+            "%s: record #%d: 'scroll.load_more_text' requires 'scroll.load_more_scope' — "
+            "without a list container a same-label button elsewhere could be pressed"
+            % (where, index)
+        )
+    if result["load_more_scope"] is not None and result["load_more_text"] is None:
+        raise ProfileError(
+            "%s: record #%d: 'scroll.load_more_scope' is only allowed together with "
+            "'scroll.load_more_text'" % (where, index)
+        )
 
     return result
 

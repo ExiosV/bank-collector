@@ -47,7 +47,7 @@ class TwoPageBrowser(FakePage):
         for known, html in self.pages.items():
             if known.rstrip("/") == url.rstrip("/"):
                 self.url = url
-                self.root = parse_html(html)
+                self._set_root(html)
                 return None
         raise LookupError("no fixture for %r" % url)
 
@@ -207,3 +207,7 @@ def test_alfa_scroll_block_has_expected_values():
     assert scroll["settle_ms"] == 1200
     assert scroll["stop_after_empty_rounds"] == 6
     assert scroll["stop_before_date"] == "2026-01-01"
+    # The click is scoped: the label without a container would be rejected by
+    # the validator, so the two keys always travel together.
+    assert scroll["load_more_text"] == "Показать ещё"
+    assert "load_more_scope" in scroll and scroll["load_more_scope"]

@@ -121,9 +121,11 @@ class ElementAdapter(object):
     """Adapt a Playwright element handle to the protocol of ``collect``.
 
     ``fill`` and ``click`` are the ONLY write primitives of the whole
-    package.  They are used by one single place — ``bank_collector.unlock``,
-    which types the cabinet's static code on the screen it has recognised —
-    and by nothing else: the collector itself never touches them.
+    package.  ``fill`` is used by one single place — ``bank_collector.unlock``,
+    which types the cabinet's static code on the screen it has recognised.
+    ``click`` has exactly two callers: ``unlock`` (the submit button of that
+    screen) and ``collect`` (the one "load more" button of a scrolled list,
+    only when the profile names it and exactly one such button exists).
     """
 
     def __init__(self, handle):
@@ -144,7 +146,7 @@ class ElementAdapter(object):
         return self._handle.fill(value)
 
     def click(self):
-        """Click the element (used only by ``unlock``)."""
+        """Click the element (used by ``unlock`` and the load-more button)."""
         return self._handle.click()
 
 

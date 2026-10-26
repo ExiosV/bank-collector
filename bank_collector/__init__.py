@@ -5,10 +5,12 @@ Hard rules of this package (see docs/SECURITY.md):
 * it NEVER logs in — it attaches over CDP to a browser you already opened and
   logged into by hand;
 * it NEVER asks for, stores or transmits passwords, SMS codes or cookies;
-* it is read-only for everything except the opt-in static-code screen: it only
-  reads the already rendered DOM (scrolling it is read-only too — it moves the
-  viewport, it clicks nothing) and never clicks
-  "download statement", "pay", "transfer" or any other mutating control;
+* it is read-only for everything except two narrow, opt-in cases: the
+  static-code screen (``--enter-code``) and the list's own "load more" button
+  when the profile names its exact text and exactly one such button exists.
+  Otherwise it only reads the already rendered DOM (scrolling it is read-only
+  too — it moves the viewport) and never clicks "download statement", "pay",
+  "transfer" or any other mutating control;
 * everything stays on your disk — the default output directory is ``data/``
   which is git-ignored.
 """

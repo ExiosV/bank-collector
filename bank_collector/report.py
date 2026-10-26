@@ -18,7 +18,7 @@ When the run scrolled the rendered list, the document holds one more key —
 the provenance of that scroll:
 
     {
-      "scroll": {"rounds": 12, "rows": 143, "stop": "date",
+      "scroll": {"rounds": 12, "rows": 143, "stop": "date", "clicks": 0,
                  "oldest_date": "2025-12-31", "complete": true}
     }
 

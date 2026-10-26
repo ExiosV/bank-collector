@@ -6,10 +6,18 @@ Exit codes
 2   no browser could be attached (browser not started / no debugging port)
 3   the profile is missing or invalid, or the code file of ``--enter-code``
     is missing or readable by other users
-4   the page was read but nothing could be extracted (warning is printed)
+4   the page was read but nothing could be extracted (warning is printed), or
+    an imported statement export holds no operations at all
 5   the history is incomplete: the scroll did not reach ``stop_before_date``
     (or hit ``max_rounds``), or a fuller snapshot on disk was kept and the
     new report went to ``<bank>.partial.json`` — not a success either way
+
+``--import-statement PATH`` reads a statement the owner downloaded by hand
+from the cabinet. It needs ``--bank`` and no browser: the file is read from
+the local disk only, and the report is written to
+``<out>/<bank>-statement.json`` (never ``<bank>.json``). Exit code 3 means
+an unknown bank, an unreadable file or a missing column; 4 means the export
+is empty.
 
 The tool never asks for a password, an SMS code or a cookie, and it never
 logs in. It only reads the page that is already open in *your* browser.
@@ -78,6 +86,7 @@ def build_parser():
             "  bank-collector --bank example --cdp-url http://127.0.0.1:9222\n"
             "  bank-collector --bank example --out data --csv\n"
             "  bank-collector --bank alfa --enter-code --code-file ~/.config/bank-collector/alfa-code\n"
+            "  bank-collector --bank alfa --import-statement ~/Downloads/statement.csv\n"
             "  bank-collector --list-profiles\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -115,6 +124,16 @@ def build_parser():
         help=(
             "remove the marker of a failed code entry (the file next to the code file), "
             "so that the next run may try again; needs no browser and types nothing"
+        ),
+    )
+    parser.add_argument(
+        "--import-statement",
+        metavar="PATH",
+        default=None,
+        help=(
+            "import a statement CSV you downloaded by hand from the cabinet "
+            "(needs --bank, no browser); the report goes to "
+            "<out>/<bank>-statement.json"
         ),
     )
     parser.add_argument(
@@ -414,6 +433,44 @@ def _exit_code(report, written, kept, stream=None):
     return EXIT_OK
 
 
+def _import_statement(args):
+    """Import a hand-downloaded statement: no browser, no CDP, local file only.
+
+    The report goes to ``<out>/<bank>-statement.json`` — never to
+    ``<bank>.json``, so a statement can never be mistaken for a cabinet run
+    (and never replaces the fuller snapshot protection of one).
+    """
+    # Imported here so that the browser path stays free of the CSV parser.
+    from .statement import EmptyStatementError, StatementError, read_statement
+
+    try:
+        collected = read_statement(args.bank, args.import_statement)
+    except EmptyStatementError as exc:
+        sys.stderr.write("statement error: %s\n" % exc)
+        return EXIT_NOTHING
+    except StatementError as exc:
+        sys.stderr.write("statement error: %s\n" % exc)
+        return EXIT_BAD_PROFILE
+
+    report = report_mod.build_report(collected)
+    report["statement"] = collected["statement"]
+
+    os.makedirs(args.out, exist_ok=True)
+    path = os.path.join(args.out, "%s-statement.json" % args.bank)
+    report_mod.write_json(report, path)
+    sys.stdout.write("written: %s\n" % path)
+
+    statement = report["statement"]
+    period = statement["period"]
+    sys.stdout.write(
+        "statement: %d operations, %s .. %s\n"
+        % (statement["rows"], period[0], period[1])
+    )
+    for warning in report["warnings"]:
+        sys.stderr.write("warning: %s\n" % warning)
+    return EXIT_OK
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -425,6 +482,16 @@ def main(argv=None):
     if args.clear_code_failure:
         # Works without a browser, without a bank and without typing anything.
         return _clear_code_failure(args)
+
+    if args.import_statement:
+        # A statement import is a local file read: a browser cannot help it.
+        if not args.bank:
+            parser.error("--bank is required with --import-statement")
+        if args.enter_code:
+            parser.error("--enter-code cannot be used with --import-statement")
+        if args.cdp_url != DEFAULT_CDP_URL:
+            parser.error("--cdp-url cannot be used with --import-statement")
+        return _import_statement(args)
 
     if not args.bank:
         parser.error("--bank is required (or use --list-profiles)")

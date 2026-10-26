@@ -381,6 +381,23 @@ def test_a_div_with_the_label_inside_the_scope_forces_incomplete():
     ]
 
 
+def test_a_div_role_button_with_the_label_counts_once():
+    """One element is one control: [role=button] is not also a text lookalike."""
+    page = FakePage(
+        _history([_day(1)], "<div role='button'>Показать ещё</div>")
+    )
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a div is never clicked"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: 'Показать ещё' found outside the list or not as a button (1), "
+        "not clicked — history may be incomplete"
+    ]
+
+
 def test_a_row_less_wrapper_matching_the_scope_is_filtered_out():
     """Only containers that hold rows count: an empty match must not stop the click."""
     page = FakePage(

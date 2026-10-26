@@ -555,9 +555,15 @@ def _text_only_label_count(scope, label_folded):
     the label plus its children is the container of a control, not an inert
     lookalike.  Counting without identity comparisons also lets the caller
     subtract the ones that live inside a matching control.
+
+    A ``div``/``span`` that itself carries ``role="button"`` is skipped: it is
+    already counted by the control query, and counting it here too would
+    report one element as two.
     """
     count = 0
-    for element in scope.query_all("div, span"):
+    for element in scope.query_all(
+        "div:not([role=button]), span:not([role=button])"
+    ):
         try:
             if element.query_all("*"):
                 continue
@@ -579,6 +585,10 @@ def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
     positive number means the history may be incomplete: the list offered no
     clickable button, but a same-label control existed elsewhere (an offers
     block) or as a link/div.
+
+    Each element is counted once: a ``<div role="button">`` is a control, not
+    a control plus a text-only lookalike, and a label span inside a control is
+    part of that control.
     """
     folded = _collapsed(load_more_text).casefold()
     controls = [
@@ -589,8 +599,9 @@ def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
     total = len(controls)
 
     # A plain div/span can carry the label without being a button.  A span
-    # inside a matching button is part of that button, not a second control,
-    # so those are subtracted.
+    # inside a matching control is part of that control, not a second one,
+    # so those are subtracted; a div/span that is itself a control was never
+    # added to the text-only count in the first place.
     text_only = _text_only_label_count(page, folded)
     for control in controls:
         text_only -= _text_only_label_count(control, folded)

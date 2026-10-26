@@ -17,12 +17,16 @@ from bank_collector.cli import (
 from bank_collector.statement import (
     EmptyStatementError,
     StatementError,
+    _mask_digits,
     read_statement,
 )
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 STATEMENT = os.path.join(FIXTURES, "alfa_statement.csv")
 EMPTY = os.path.join(FIXTURES, "alfa_statement_empty.csv")
+SCHEMA = os.path.join(
+    os.path.dirname(FIXTURES), "..", "schema", "transactions.schema.json"
+)
 
 NOW = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
 
@@ -108,6 +112,7 @@ def test_statement_block_reports_file_rows_period_and_accounts():
         "МИР",
     ]
     assert statement["own_transfers"] == 2
+    assert statement["own_transfer_pairs"] == 1
 
 
 def test_every_field_is_a_leaf():
@@ -256,6 +261,49 @@ def test_a_malformed_row_is_skipped_with_a_warning_that_keeps_values_out(tmp_pat
     assert "не-число" not in warnings
 
 
+def test_a_malformed_transaction_date_keeps_the_row(tmp_path):
+    path = _write(
+        tmp_path / "bad-transaction-date.csv",
+        [_row(transactionDate="31.02.2026")],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert len(result["transactions"]) == 1
+    leaf = result["transactions"][0]["transaction_date"]
+    assert leaf["raw"] == "31.02.2026"
+    assert leaf["value"] is None
+    assert result["warnings"] == [
+        "line 2: cannot parse transactionDate, kept with an empty value"
+    ]
+
+
+def test_an_unparseable_transaction_date_with_a_long_number_is_masked(tmp_path):
+    path = _write(
+        tmp_path / "long-transaction-date.csv",
+        [_row(transactionDate="9999888877776666")],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    dump = json.dumps(result, ensure_ascii=False)
+
+    assert len(result["transactions"]) == 1
+    assert result["transactions"][0]["transaction_date"]["value"] is None
+    assert "9999888877776666" not in dump
+    assert "***6666" in dump
+    assert re.search(r"\d{12,}", dump) is None
+
+
+def test_an_empty_transaction_date_is_kept_without_a_warning(tmp_path):
+    path = _write(tmp_path / "empty-transaction-date.csv", [_row(transactionDate="")])
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert len(result["transactions"]) == 1
+    assert result["transactions"][0]["transaction_date"]["value"] is None
+    assert result["warnings"] == []
+
+
 def test_an_unknown_type_warns_once_and_keeps_the_amount_positive(tmp_path):
     path = _write(
         tmp_path / "odd-type.csv",
@@ -288,8 +336,13 @@ def test_cli_writes_the_statement_file_and_exits_zero(tmp_path, capsys):
 
     report = json.loads(path.read_text(encoding="utf-8"))
     assert report["status"] == "statement"
+    assert report["schema_version"] == "2"
     assert report["statement"]["rows"] == 10
+    assert report["statement"]["own_transfer_pairs"] == 1
     assert len(report["transactions"]) == 10
+    assert [transaction["own_transfer_reason"] for transaction in report["transactions"]].count(
+        "title"
+    ) == 2
 
     out = capsys.readouterr().out
     assert "written: %s" % path in out
@@ -417,6 +470,47 @@ def test_a_header_only_export_is_empty(tmp_path):
         read_statement("alfa", path, now=NOW)
 
 
+def test_an_html_error_page_is_not_an_empty_statement(tmp_path, capsys):
+    path = tmp_path / "session-expired.csv"
+    path.write_text("<html><body>Сессия истекла</body></html>\n", encoding="utf-8")
+
+    with pytest.raises(StatementError) as raised:
+        read_statement("alfa", str(path), now=NOW)
+
+    assert "not a bank statement export" in str(raised.value)
+    assert not isinstance(raised.value, EmptyStatementError)
+
+    code = main(
+        ["--bank", "alfa", "--import-statement", str(path), "--out", str(tmp_path / "out")]
+    )
+    assert code == EXIT_BAD_PROFILE
+    err = capsys.readouterr().err
+    assert "not a bank statement export" in err
+    assert not (tmp_path / "out" / "alfa-statement.json").exists()
+
+
+def test_a_zero_byte_file_is_not_an_empty_statement(tmp_path):
+    path = tmp_path / "empty.csv"
+    path.write_text("", encoding="utf-8")
+
+    with pytest.raises(StatementError) as raised:
+        read_statement("alfa", str(path), now=NOW)
+
+    assert "not a bank statement export" in str(raised.value)
+    assert not isinstance(raised.value, EmptyStatementError)
+
+
+def test_a_single_junk_line_is_not_an_empty_statement(tmp_path):
+    path = tmp_path / "one-line.csv"
+    path.write_text("что-то пошло не так\n", encoding="utf-8")
+
+    with pytest.raises(StatementError) as raised:
+        read_statement("alfa", str(path), now=NOW)
+
+    assert "not a bank statement export" in str(raised.value)
+    assert not isinstance(raised.value, EmptyStatementError)
+
+
 def test_rows_present_but_none_parsed_is_a_statement_error(tmp_path, capsys):
     path = _write(
         tmp_path / "unreadable.csv",
@@ -502,6 +596,98 @@ def test_long_digit_runs_are_masked_in_text_and_in_the_file_name(tmp_path):
     assert "***0099" in result["source_url"]
 
 
+@pytest.mark.parametrize(
+    "text, masked",
+    [
+        ("2200151234561234*", "***1234*"),
+        ("*2200151234561234", "****1234"),
+        ("220015******1234*", "***1234*"),
+        ("40817.810.1.00001234567", "***4567"),
+        ("4081–7810–0000–0000–0099", "***0099"),
+    ],
+)
+def test_every_separator_inside_a_digit_run_is_masked(text, masked):
+    assert _mask_digits(text) == masked
+    assert re.search(r"\d{12,}", _mask_digits(text)) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1250.50 руб 12.10.2026",
+        "12.10.2026",
+        "Аренда 50 000 руб",
+        "МСС 5411",
+    ],
+)
+def test_ordinary_prose_and_dates_are_not_masked(text):
+    assert _mask_digits(text) == text
+
+
+def test_a_dotted_account_number_is_masked_in_a_comment(tmp_path):
+    path = _write(
+        tmp_path / "dotted.csv",
+        [_row(comment="перевод на 40817.810.1.00001234567")],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    dump = json.dumps(result, ensure_ascii=False)
+
+    assert "40817.810.1.00001234567" not in dump
+    assert "***4567" in result["transactions"][0]["comment"]["value"]
+    assert re.search(r"\d{12,}", dump) is None
+
+
+# ---------------------------------------------------------------------------
+# Warnings and errors never carry a long digit run
+# ---------------------------------------------------------------------------
+
+
+def test_a_long_digit_status_is_masked_in_the_warning(tmp_path):
+    path = _write(
+        tmp_path / "long-status.csv",
+        [
+            _row(),
+            _row(status="1234567890123456"),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    warnings = "\n".join(result["warnings"])
+
+    assert "1234567890123456" not in warnings
+    assert "***3456" in warnings
+    assert re.search(r"\d{12,}", warnings) is None
+
+
+def test_a_long_digit_operation_type_is_masked_in_the_warning(tmp_path):
+    path = _write(
+        tmp_path / "long-type.csv",
+        [_row(type="9999888877776666", amount="100")],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    warnings = "\n".join(result["warnings"])
+
+    assert "unknown operation type" in warnings
+    assert "9999888877776666" not in warnings
+    assert "***6666" in warnings
+    assert re.search(r"\d{12,}", warnings) is None
+
+
+def test_the_unreadable_file_error_masks_a_long_number_in_the_path(tmp_path):
+    path = str(tmp_path / "выписка 12345678901234567890.csv")
+
+    with pytest.raises(StatementError) as raised:
+        read_statement("alfa", path, now=NOW)
+
+    message = str(raised.value)
+    assert "cannot read the statement" in message
+    assert "12345678901234567890" not in message
+    assert "***7890" in message
+    assert re.search(r"\d{12,}", message) is None
+
+
 # ---------------------------------------------------------------------------
 # Own transfers
 # ---------------------------------------------------------------------------
@@ -525,8 +711,218 @@ def test_transfers_between_own_accounts_are_flagged_and_counted():
         "Пополнение",
     }
     assert all(transaction["title"]["value"] == "Перевод себе" for transaction in flagged)
+    assert all(
+        transaction["own_transfer_reason"] == "title" for transaction in flagged
+    )
+    assert {transaction["own_transfer_pair"] for transaction in flagged} == {"p1"}
     assert result["statement"]["own_transfers"] == 2
+    assert result["statement"]["own_transfer_pairs"] == 1
     assert flags["ПЯТЁРОЧКА"] is False
+
+
+def test_the_bank_category_flags_an_own_transfer_case_insensitively(tmp_path):
+    path = _write(
+        tmp_path / "by-category.csv",
+        [
+            _row(
+                merchant="Пополнение",
+                category="МЕЖДУ\u00a0СВОИМИ\u00a0СЧЕТАМИ",
+                type="Пополнение",
+                amount="3000",
+            )
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    transaction = result["transactions"][0]
+
+    assert transaction["own_transfer"] is True
+    assert transaction["own_transfer_reason"] == "category"
+    assert transaction["own_transfer_pair"] == "", "there is no counterpart"
+    assert result["statement"]["own_transfers"] == 1
+    assert result["statement"]["own_transfer_pairs"] == 0
+
+
+def test_a_transfer_to_an_own_account_in_another_bank_is_flagged_by_title(tmp_path):
+    path = _write(
+        tmp_path / "by-title.csv",
+        [
+            _row(
+                merchant="Перевод себе в другой банк через СБП",
+                category="Переводы",
+                type="Списание",
+            )
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    transaction = result["transactions"][0]
+
+    assert transaction["own_transfer"] is True
+    assert transaction["own_transfer_reason"] == "title"
+
+
+def test_an_fx_self_transfer_is_flagged_by_category_without_a_pair(tmp_path):
+    path = _write(
+        tmp_path / "fx.csv",
+        [
+            _row(
+                merchant="",
+                comment="",
+                category="Между своими счетами",
+                type="Списание",
+                amount="100",
+                currency="USD",
+            )
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+    transaction = result["transactions"][0]
+
+    assert transaction["amount"]["currency"] == "USD"
+    assert transaction["amount"]["value"] == "-100"
+    assert transaction["own_transfer"] is True
+    assert transaction["own_transfer_reason"] == "category"
+    assert transaction["own_transfer_pair"] == ""
+    assert result["statement"]["own_transfer_pairs"] == 0
+
+
+def test_a_same_day_same_amount_pair_without_the_bank_signal_is_not_flagged(tmp_path):
+    """Rent out of one account and a salary into another is not a self-transfer."""
+    path = _write(
+        tmp_path / "rent-salary.csv",
+        [
+            _row(
+                merchant="Аренда",
+                category="Аренда",
+                type="Списание",
+                amount="50000",
+                accountNumber=ACCOUNT_NUMBER,
+            ),
+            _row(
+                merchant="Зарплата",
+                category="Зарплата",
+                type="Пополнение",
+                amount="50000",
+                accountNumber="40817810000000000002",
+            ),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert [transaction["own_transfer"] for transaction in result["transactions"]] == [
+        False,
+        False,
+    ]
+    assert [
+        transaction["own_transfer_reason"] for transaction in result["transactions"]
+    ] == ["", ""]
+    assert [
+        transaction["own_transfer_pair"] for transaction in result["transactions"]
+    ] == ["", ""]
+    assert result["statement"]["own_transfers"] == 0
+    assert result["statement"]["own_transfer_pairs"] == 0
+
+
+def test_marked_rows_pair_one_to_one_in_file_order(tmp_path):
+    path = _write(
+        tmp_path / "two-pairs.csv",
+        [
+            _row(merchant="Перевод себе", type="Списание", amount="1500"),
+            _row(merchant="Перевод себе", type="Списание", amount="2500"),
+            _row(
+                merchant="Перевод себе",
+                type="Пополнение",
+                amount="1500",
+                accountNumber="40817810000000000002",
+            ),
+            _row(
+                merchant="Перевод себе",
+                type="Пополнение",
+                amount="2500",
+                accountNumber="40817810000000000002",
+            ),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert [
+        transaction["own_transfer_pair"] for transaction in result["transactions"]
+    ] == ["p1", "p2", "p1", "p2"]
+    assert result["statement"]["own_transfers"] == 4
+    assert result["statement"]["own_transfer_pairs"] == 2
+
+
+def test_pairing_needs_the_bank_signal_on_both_rows(tmp_path):
+    path = _write(
+        tmp_path / "one-sided.csv",
+        [
+            _row(merchant="Перевод себе", type="Списание", amount="4000"),
+            _row(
+                merchant="Пополнение",
+                category="Прочее",
+                type="Пополнение",
+                amount="4000",
+                accountNumber="40817810000000000002",
+            ),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert [transaction["own_transfer"] for transaction in result["transactions"]] == [
+        True,
+        False,
+    ]
+    assert [
+        transaction["own_transfer_pair"] for transaction in result["transactions"]
+    ] == ["", ""]
+    assert result["statement"]["own_transfer_pairs"] == 0
+
+
+def test_marked_rows_on_the_same_account_are_not_paired(tmp_path):
+    path = _write(
+        tmp_path / "same-account.csv",
+        [
+            _row(category="Между своими счетами", type="Списание", amount="100"),
+            _row(category="Между своими счетами", type="Пополнение", amount="100"),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert [transaction["own_transfer"] for transaction in result["transactions"]] == [
+        True,
+        True,
+    ]
+    assert [
+        transaction["own_transfer_pair"] for transaction in result["transactions"]
+    ] == ["", ""]
+    assert result["statement"]["own_transfer_pairs"] == 0
+
+
+def test_a_pair_needs_the_same_currency(tmp_path):
+    path = _write(
+        tmp_path / "currency.csv",
+        [
+            _row(merchant="Перевод себе", type="Списание", amount="4000", currency="RUB"),
+            _row(
+                merchant="Перевод себе",
+                type="Пополнение",
+                amount="4000",
+                currency="USD",
+                accountNumber="40817810000000000002",
+            ),
+        ],
+    )
+
+    result = read_statement("alfa", path, now=NOW)
+
+    assert result["statement"]["own_transfers"] == 2
+    assert result["statement"]["own_transfer_pairs"] == 0
 
 
 def test_a_transfer_needs_a_different_account_and_the_opposite_type(tmp_path):
@@ -545,6 +941,80 @@ def test_a_transfer_needs_a_different_account_and_the_opposite_type(tmp_path):
         False,
     ]
     assert result["statement"]["own_transfers"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The report row against schema/transactions.schema.json
+# ---------------------------------------------------------------------------
+
+try:  # jsonschema is optional: the fallback below checks the same rules
+    import jsonschema
+except ImportError:  # pragma: no cover - depends on the environment
+    jsonschema = None
+
+FIELD_KEYS = {"raw", "value", "currency", "money"}
+
+
+def _check_field(value, where):
+    assert isinstance(value, dict), "%s is not a leaf object" % where
+    assert set(value) == FIELD_KEYS, "%s has unexpected keys: %s" % (where, sorted(value))
+    assert isinstance(value["raw"], (str, type(None))), where
+    assert isinstance(value["value"], (str, type(None))), where
+    assert isinstance(value["currency"], (str, type(None))), where
+    assert isinstance(value["money"], bool), where
+
+
+def _check_row_against_schema(row, schema):
+    """The part of the schema a statement row touches, without jsonschema.
+
+    Declared properties are checked by type; every other key must be a leaf
+    object — that is exactly the ``additionalProperties`` rule.
+    """
+    declared = schema["properties"]
+    for name, value in row.items():
+        spec = declared.get(name)
+        if spec is None:
+            _check_field(value, name)
+        elif "oneOf" in spec:
+            assert value is None or isinstance(value, dict), name
+            if value is not None:
+                _check_field(value, name)
+        elif spec.get("type") == "boolean":
+            assert isinstance(value, bool), name
+        elif spec.get("type") == "string":
+            assert isinstance(value, str), name
+            if "enum" in spec:
+                assert value in spec["enum"], name
+        else:  # pragma: no cover - the schema only uses the shapes above
+            raise AssertionError("unhandled schema property %r" % name)
+
+
+def test_statement_rows_validate_against_the_transaction_schema(tmp_path):
+    with open(SCHEMA, encoding="utf-8") as handle:
+        schema = json.load(handle)
+
+    rows = _result()["transactions"]
+
+    if jsonschema is not None:  # pragma: no cover - not installed here
+        validator = jsonschema.Draft7Validator(schema)
+        errors = [error.message for row in rows for error in validator.iter_errors(row)]
+        assert errors == []
+        return
+
+    assert "own_transfer" in schema["properties"]
+    assert "own_transfer_reason" in schema["properties"]
+    assert "own_transfer_pair" in schema["properties"]
+    for row in rows:
+        _check_row_against_schema(row, schema)
+
+
+def test_a_row_with_an_undeclared_scalar_would_not_validate():
+    """The schema's additionalProperties rule rejects a bare boolean."""
+    with open(SCHEMA, encoding="utf-8") as handle:
+        schema = json.load(handle)
+
+    with pytest.raises(AssertionError):
+        _check_row_against_schema({"not_a_declared_field": True}, schema)
 
 
 # ---------------------------------------------------------------------------

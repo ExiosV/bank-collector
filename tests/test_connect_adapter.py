@@ -42,6 +42,10 @@ class FakeMouse(object):
 
     def __init__(self):
         self.wheels = []
+        self.moves = []
+
+    def move(self, x, y):
+        self.moves.append((x, y))
 
     def wheel(self, dx, dy):
         self.wheels.append((dx, dy))
@@ -207,3 +211,14 @@ def test_frame_with_no_page_is_a_no_op():
     # Should not raise, should just return None
     result = adapter.scroll_by(100)
     assert result is None
+
+
+def test_the_wheel_turns_over_the_middle_of_the_viewport():
+    """A list with its own scroll container scrolls only under the pointer."""
+    raw = FakePlaywrightPage("https://example.invalid/history/")
+    raw.viewport_size = {"width": 1280, "height": 800}
+
+    PageAdapter(raw).scroll_by(1200)
+
+    assert raw.mouse.moves == [(640, 400)]
+    assert raw.mouse.wheels == [(0, 1200)]

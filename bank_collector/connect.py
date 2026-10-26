@@ -39,6 +39,20 @@ _HINT = (
 )
 
 
+
+def _wheel(page, dy):
+    """Turn the mouse wheel over the middle of the viewport.
+
+    The wheel scrolls whatever lies under the pointer, and Playwright keeps
+    the pointer at (0, 0) until it is moved — over the header, not over a
+    list that may scroll inside its own container. Moving the pointer is a
+    hover, not a click: it stays read-only.
+    """
+    size = getattr(page, "viewport_size", None)
+    if size and size.get("width") and size.get("height"):
+        page.mouse.move(size["width"] / 2, size["height"] / 2)
+    return page.mouse.wheel(0, int(dy))
+
 class BrowserUnavailable(Exception):
     """Raised when no browser could be attached to."""
 
@@ -148,7 +162,7 @@ class FrameAdapter(object):
         page = getattr(self._frame, "page", None)
         if page is None:
             return None
-        return page.mouse.wheel(0, int(dy))
+        return _wheel(page, dy)
 
 
 class PageAdapter(object):
@@ -185,7 +199,7 @@ class PageAdapter(object):
         the driver reads the rows a cabinet appends while the list is
         scrolled.
         """
-        return self._page.mouse.wheel(0, int(dy))
+        return _wheel(self._page, dy)
 
     @property
     def frames(self):

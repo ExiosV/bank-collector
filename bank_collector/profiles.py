@@ -63,9 +63,9 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
           step_px: 1200            # pixels per step, int >= 100, default 1500
           settle_ms: 900           # wait after each step for the SPA to append rows, int >= 0, default 800
           stop_after_empty_rounds: 4   # stop after N consecutive rounds with no new rows, int >= 1, default 3
-          stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated on/before it is seen
+          stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated strictly before it is seen
 
-    The driver stops when the list stops growing, when a row is dated on or
+    The driver stops when the list stops growing, when a row is dated strictly
     before ``stop_before_date`` or when ``max_rounds`` is reached (the last
     case is reported as a warning).
 

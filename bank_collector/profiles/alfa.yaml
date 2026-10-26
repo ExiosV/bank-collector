@@ -40,12 +40,14 @@ transactions:
           selector: "[data-test-id=transaction-status]"
     # The history list shows 20 operations per screen and appends the next
     # ones while it is scrolled. Scrolling is read-only: the viewport moves,
-    # nothing is clicked and no request of our own is sent.
+    # nothing is clicked and no request of our own is sent. A slow cabinet
+    # gets about 7 s (6 empty rounds x 1.2 s) to append rows before the list
+    # counts as finished; stopping short of stop_before_date is a warning.
     scroll:
       max_rounds: 200
       step_px: 1200
-      settle_ms: 900
-      stop_after_empty_rounds: 4
+      settle_ms: 1200
+      stop_after_empty_rounds: 6
       stop_before_date: "2026-01-01"
 
 # The cabinet's static "secret code" screen (NOT an SMS code): after a long

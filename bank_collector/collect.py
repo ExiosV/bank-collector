@@ -43,6 +43,7 @@ reached or the round limit is hit.
 
 import re
 import time
+from collections import Counter
 
 __all__ = [
     "collect",
@@ -449,15 +450,31 @@ def _row_key(row):
     return tuple(_field_text(row, name) for name in _ROW_KEY_FIELDS)
 
 
+def _row_date(row):
+    """The ``YYYY-MM-DD`` date of a row, or ``None`` when it has none."""
+    text = _field_text(row, "date")[:10]
+    if len(text) == 10 and _DATE_PREFIX_RE.match(text):
+        return text
+    return None
+
+
+def _oldest_date(rows):
+    """The oldest ``YYYY-MM-DD`` date among *rows*, or ``None``."""
+    dates = [date for date in (_row_date(row) for row in rows) if date]
+    return min(dates) if dates else None
+
+
 def _reached_date(rows, stop_before):
-    """True when a row is dated on or before *stop_before* (a ``YYYY-MM-DD``)."""
+    """True when a row is dated strictly before *stop_before* (a ``YYYY-MM-DD``).
+
+    Strictly before, not on: the operations of one day may arrive in two
+    batches, so the day of *stop_before* itself is complete only once an
+    older row has been rendered.
+    """
     if not stop_before:
         return False
-    for row in rows:
-        text = _field_text(row, "date")[:10]
-        if len(text) == 10 and _DATE_PREFIX_RE.match(text) and text <= stop_before:
-            return True
-    return False
+    oldest = _oldest_date(rows)
+    return oldest is not None and oldest < stop_before
 
 
 def _append_scroll_warnings(warnings, scrolled_warnings):
@@ -489,7 +506,9 @@ def _scroll_section(
     scroll_by = getattr(page, "scroll_by", None)
     if scroll_by is None:
         # The page cannot scroll — nothing is done, and it is said so.
-        return rows, {"rounds": 0, "rows": len(rows), "stop": "no-scroll"}
+        info = {"rounds": 0, "rows": len(rows), "stop": "no-scroll", "oldest_date": _oldest_date(rows)}
+        _warn_if_short(warnings, section_name, info, scroll_def.get("stop_before_date"))
+        return rows, info
 
     max_rounds = scroll_def["max_rounds"]
     step_px = scroll_def["step_px"]
@@ -497,11 +516,10 @@ def _scroll_section(
     stop_after_empty = scroll_def["stop_after_empty_rounds"]
     stop_before = scroll_def["stop_before_date"]
 
-    seen = set()
-    for row in rows:
-        key = _row_key(row)
-        if any(key):
-            seen.add(key)
+    # How many times each operation has been kept so far. A key may repeat:
+    # two equal coffees on one day are two operations, so a round adds a row
+    # only when it shows that key more often than the rows already kept.
+    seen = Counter(_row_key(row) for row in rows)
 
     rounds = 0
     empty_rounds = 0
@@ -520,14 +538,16 @@ def _scroll_section(
             time.sleep(settle_ms / 1000.0)
 
         added = 0
+        in_round = Counter()
         for row in _extract_rows_stable(
             page, record_def, section_name, scrolled_warnings, timeout_ms=timeout_ms
         ):
             key = _row_key(row)
             if any(key):
-                if key in seen:
+                in_round[key] += 1
+                if in_round[key] <= seen[key]:
                     continue
-                seen.add(key)
+                seen[key] += 1
             # A row without a date, a title, a category and an amount cannot
             # be recognised as a duplicate — it is always kept.
             rows.append(row)
@@ -552,7 +572,28 @@ def _scroll_section(
         )
 
     _append_scroll_warnings(warnings, scrolled_warnings)
-    return rows, {"rounds": rounds, "rows": len(rows), "stop": stop}
+    info = {"rounds": rounds, "rows": len(rows), "stop": stop, "oldest_date": _oldest_date(rows)}
+    _warn_if_short(warnings, section_name, info, stop_before)
+    return rows, info
+
+
+def _warn_if_short(warnings, section_name, info, stop_before):
+    """Say so when the history ends later than the profile asked for.
+
+    A list that stopped growing (``empty``), a broken scroll (``error``) or a
+    page that cannot scroll may simply not have rendered the older rows yet;
+    without this warning such a run would look like a complete history. The
+    round limit has a warning of its own.
+    """
+    if not stop_before or info["stop"] in ("date", "limit"):
+        return
+    oldest = info.get("oldest_date")
+    if oldest is not None and oldest <= stop_before:
+        return
+    warnings.append(
+        "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
+        % (section_name, oldest or "no dated row", stop_before, info["stop"])
+    )
 
 
 def extract_section(
@@ -598,7 +639,8 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     ``warnings``. ``source_urls`` lists every page that was opened, in order.
     When a record asked for scrolling, the dict also holds a ``scroll`` key
     (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
-    "no-scroll"}``) that tells how the scroll ended.
+    "no-scroll", "oldest_date": "YYYY-MM-DD"|None}``) that tells how the
+    scroll ended and how far back it reached.
     """
     warnings = []
     url = profile["url"]

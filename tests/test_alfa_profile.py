@@ -132,7 +132,12 @@ def test_both_pages_are_reported_as_sources():
 
     assert result["source_urls"] == [DASHBOARD_URL, HISTORY_URL]
     assert result["source_url"] == DASHBOARD_URL
-    assert result["warnings"] == []
+    # The synthetic history is short: the run says that it did not reach
+    # the date of the profile, and nothing else.
+    assert result["warnings"] == [
+        "transactions: history reaches back only to 2026-01-14, not to 2026-01-01 "
+        "(stop: empty, history may be incomplete)"
+    ]
 
 
 def test_a_field_defined_in_group_and_item_warns_and_the_item_wins():
@@ -199,6 +204,6 @@ def test_alfa_scroll_block_has_expected_values():
 
     assert scroll["max_rounds"] == 200
     assert scroll["step_px"] == 1200
-    assert scroll["settle_ms"] == 900
-    assert scroll["stop_after_empty_rounds"] == 4
+    assert scroll["settle_ms"] == 1200
+    assert scroll["stop_after_empty_rounds"] == 6
     assert scroll["stop_before_date"] == "2026-01-01"

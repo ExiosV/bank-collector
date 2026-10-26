@@ -46,6 +46,7 @@ EXIT_OK = 0
 EXIT_NO_BROWSER = 2
 EXIT_BAD_PROFILE = 3
 EXIT_NOTHING = 4
+EXIT_SHORTER = 5
 
 #: The line that is printed on stdout when the code screen was handled.
 UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
@@ -172,8 +173,42 @@ def _print_profiles(stream=sys.stdout):
         stream.write("%-16s %-12s %s\n" % (profile["name"], profile.get("status") or "?", profile.get("bank")))
 
 
+def _shorter_than_before(report, path):
+    """True when *report* would replace a fuller snapshot at *path*.
+
+    A run whose scroll did not reach the date of the profile (``stop`` other
+    than ``date``) may be a partial pull of a slow cabinet. It must not
+    overwrite yesterday's longer history: the daily job would trade a year
+    for a screen. A run that reached the date is complete and always wins.
+    """
+    scroll = report.get("scroll") or {}
+    if not scroll or scroll.get("stop") == "date":
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    previous_rows = previous.get("transactions") if isinstance(previous, dict) else None
+    if not isinstance(previous_rows, list):
+        return False
+    return len(previous_rows) > len(report.get("transactions") or [])
+
+
 def _write_outputs(report, out_dir, formats, bank):
+    """Write the report; return ``(paths, kept)``.
+
+    *kept* is the path of a fuller snapshot that was left in place: the new,
+    shorter report then goes to ``<bank>.partial.json`` and nothing else is
+    written.
+    """
     os.makedirs(out_dir, exist_ok=True)
+    if formats in ("json", "both"):
+        path = os.path.join(out_dir, "%s.json" % bank)
+        if _shorter_than_before(report, path):
+            partial = os.path.join(out_dir, "%s.partial.json" % bank)
+            report_mod.write_json(report, partial)
+            return [partial], path
     written = []
     if formats in ("json", "both"):
         path = os.path.join(out_dir, "%s.json" % bank)
@@ -186,7 +221,7 @@ def _write_outputs(report, out_dir, formats, bank):
         path = os.path.join(out_dir, "%s-transactions.csv" % bank)
         report_mod.write_csv(report["transactions"], path)
         written.append(path)
-    return written
+    return written, None
 
 
 def _snapshot(page, out_dir, bank):
@@ -400,7 +435,7 @@ def main(argv=None):
             for path in paths:
                 sys.stdout.write("snapshot: %s\n" % path)
 
-        written = _write_outputs(report, args.out, args.format, profile.get("bank") or args.bank)
+        written, kept = _write_outputs(report, args.out, args.format, profile.get("bank") or args.bank)
         for path in written:
             sys.stdout.write("written: %s\n" % path)
 
@@ -433,6 +468,13 @@ def main(argv=None):
                 "(see docs/ADD_A_BANK.md) and try --snapshot\n"
             )
             return EXIT_NOTHING
+        if kept:
+            sys.stderr.write(
+                "shorter history than the snapshot already in %s (%d transactions, scroll stop: %s): "
+                "it was kept, the new report is in %s\n"
+                % (kept, len(report["transactions"]), report["scroll"].get("stop"), written[0])
+            )
+            return EXIT_SHORTER
         return EXIT_OK
     finally:
         # Close the tab we opened ourselves, and never the person's browser.

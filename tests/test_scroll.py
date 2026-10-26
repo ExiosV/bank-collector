@@ -171,14 +171,56 @@ def test_the_scrolling_stops_when_the_list_stops_growing():
 
 
 def test_the_scrolling_stops_at_the_date_of_the_profile():
-    old = _history([_day(1), ("2026-01-01", "Старая операция", "-1,00")])
+    old = _history([_day(1), ("2025-12-31", "Старая операция", "-1,00")])
     page = FakePage(_history([_day(1)]), pages=[old])
 
     result = collect(page, _profile(_record(_scroll(stop_before_date="2026-01-01"))))
 
     assert result["scroll"]["stop"] == "date"
-    assert _dates(result) == ["2026-03-01", "2026-01-01"]
+    assert result["scroll"]["oldest_date"] == "2025-12-31"
+    assert _dates(result) == ["2026-03-01", "2025-12-31"]
     assert _warnings(result) == []
+
+
+def test_a_row_on_the_date_itself_does_not_stop_the_scrolling():
+    """The day of the limit may arrive in two batches: only an older row stops."""
+    on_the_day = _history([_day(1), ("2026-01-01", "Первая", "-1,00")])
+    more_of_the_day = _history(
+        [_day(1), ("2026-01-01", "Первая", "-1,00"), ("2026-01-01", "Вторая", "-2,00")]
+    )
+    page = FakePage(_history([_day(1)]), pages=[on_the_day, more_of_the_day])
+
+    result = collect(page, _profile(_record(_scroll(stop_before_date="2026-01-01"))))
+
+    assert _dates(result) == ["2026-03-01", "2026-01-01", "2026-01-01"]
+    assert result["scroll"]["stop"] == "empty"
+    assert _warnings(result) == [], "the history reached the date: it is complete"
+
+
+def test_a_list_that_stops_short_of_the_date_is_reported():
+    page = FakePage(_history([_day(1)]), pages=[_history([_day(1), _day(2)])])
+
+    result = collect(page, _profile(_record(_scroll(stop_before_date="2026-01-01"))))
+
+    assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["oldest_date"] == "2026-03-01"
+    assert _warnings(result) == [
+        "transactions: history reaches back only to 2026-03-01, not to 2026-01-01 "
+        "(stop: empty, history may be incomplete)"
+    ]
+
+
+def test_equal_operations_of_one_day_are_kept_when_they_appear_in_a_scroll():
+    """Two equal coffees on one day are two operations, not a repeat."""
+    coffee = _day(2, title="Кофе", amount="-250,00")
+    first = _history([_day(1)])
+    second = _history([_day(1), coffee, coffee])
+    page = FakePage(first, pages=[second, second])
+
+    result = collect(page, _profile(_record(_scroll())))
+
+    assert _dates(result) == ["2026-03-01", "2026-03-02", "2026-03-02"]
+    assert result["scroll"]["rows"] == 3
 
 
 def test_a_broken_scroll_keeps_the_rows_and_warns_once():

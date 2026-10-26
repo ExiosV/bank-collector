@@ -54,9 +54,9 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
 ``scroll``
     Optional: how far and how long to scroll the rendered list, so that the
     rows a cabinet appends while the list is scrolled are read as well.
-    Scrolling is read-only — it moves the viewport, it clicks nothing and it
-    sends no request of our own.  It is only allowed on a record that has a
-    ``row`` (without rows there is nothing to count)::
+    Scrolling is read-only — it moves the viewport and sends no request of
+    our own.  It is only allowed on a record that has a ``row`` (without rows
+    there is nothing to count)::
 
         scroll:
           max_rounds: 200          # hard cap on scroll steps, int >= 1, default 50
@@ -64,10 +64,19 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
           settle_ms: 900           # wait after each step for the SPA to append rows, int >= 0, default 800
           stop_after_empty_rounds: 4   # stop after N consecutive rounds with no new rows, int >= 1, default 3
           stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated strictly before it is seen
+          load_more_text: "Показать ещё"  # optional: the one "load more" button, default none
+          max_clicks: 100          # cap on clicks of that button, int >= 1, default 100
 
     The driver stops when the list stops growing, when a row is dated strictly
     before ``stop_before_date`` or when ``max_rounds`` is reached (the last
     case is reported as a warning).
+
+    ``load_more_text`` is the single exception to "scrolling never clicks":
+    when scrolling a round added no new rows, the driver looks for buttons
+    whose whole text (stripped, whitespace collapsed) equals the string.  It
+    clicks only when exactly one such button exists, and that click merely
+    asks the list to render its next page.  None or several matches mean no
+    click.  ``max_clicks`` limits how many such clicks one run may make.
 
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
@@ -163,13 +172,17 @@ _UNLOCK_KEYS = (
 _RECORD_KEYS = ("row", "fields", "url", "wait_for", "items", "scroll")
 
 # The keys the optional ``scroll`` block of a record may carry.  It says how
-# far and how long to scroll the rendered list — never what to click.
+# far and how long to scroll the rendered list, and names the one "load more"
+# button the driver may press when scrolling added nothing — never any other
+# click.
 _SCROLL_KEYS = (
     "max_rounds",
     "step_px",
     "settle_ms",
     "stop_after_empty_rounds",
     "stop_before_date",
+    "load_more_text",
+    "max_clicks",
 )
 
 #: The values used when the profile does not say otherwise.
@@ -179,6 +192,8 @@ _SCROLL_DEFAULTS = {
     "settle_ms": 800,
     "stop_after_empty_rounds": 3,
     "stop_before_date": None,
+    "load_more_text": None,
+    "max_clicks": 100,
 }
 
 #: The smallest value each numeric key may have.
@@ -187,6 +202,7 @@ _SCROLL_MINIMUMS = {
     "step_px": 100,
     "settle_ms": 0,
     "stop_after_empty_rounds": 1,
+    "max_clicks": 1,
 }
 
 #: The only date format the profile accepts (``stop_before_date``).
@@ -374,8 +390,10 @@ def _normalise_scroll(index, scroll, where):
     """Validate the optional ``scroll`` block of a record.
 
     The block says how far and how long the driver scrolls the rendered
-    list.  It never describes *what* to click: there is nothing to click —
-    scrolling only moves the viewport.
+    list.  ``load_more_text`` names the one button that may be clicked when
+    scrolling added nothing: the text must be a non-empty string, and it is
+    compared with the whole text of a button.  Everything else stays
+    read-only — scrolling only moves the viewport.
     """
     if not isinstance(scroll, dict):
         raise ProfileError("%s: record #%d: 'scroll' must be a mapping" % (where, index))
@@ -407,6 +425,16 @@ def _normalise_scroll(index, scroll, where):
     stop_before = scroll.get("stop_before_date")
     if stop_before is not None:
         result["stop_before_date"] = _check_stop_date(index, stop_before, where)
+
+    load_more_text = scroll.get("load_more_text")
+    if load_more_text is not None:
+        if not isinstance(load_more_text, str) or not load_more_text.strip():
+            raise ProfileError(
+                "%s: record #%d: 'scroll.load_more_text' must be a non-empty string"
+                % (where, index)
+            )
+        # Compared with the whitespace-collapsed text of a button.
+        result["load_more_text"] = " ".join(load_more_text.split())
 
     return result
 

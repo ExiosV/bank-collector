@@ -47,7 +47,7 @@ class TwoPageBrowser(FakePage):
         for known, html in self.pages.items():
             if known.rstrip("/") == url.rstrip("/"):
                 self.url = url
-                self.root = parse_html(html)
+                self._set_root(html)
                 return None
         raise LookupError("no fixture for %r" % url)
 

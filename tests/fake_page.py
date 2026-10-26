@@ -9,6 +9,8 @@ so this module implements the small part of the DOM that
 * ``query_all(selector)``
 * ``content()`` / ``inner_text(selector)``
 * ``scroll_by(dy)`` -- read-only: it only moves the viewport
+* a ``click()`` hook: ``on_click(page, element)`` is called when a test
+  clicks an element, so that a click can grow the DOM like an SPA does
 
 It also ships a small CSS engine, because real bank pages are anchored on
 ``data-test-id`` attributes and nest their rows deeply. The subset supported
@@ -76,7 +78,8 @@ class FakeElement(object):
             parts.append(child.text_content())
         return "".join(parts)
 
-    # -- the two write primitives (used only by bank_collector.unlock) ----
+    # -- the write primitives (used by bank_collector.unlock and the one
+    #    load-more click of the collector) -------------------------------
     def fill(self, value):
         self.writes.append(("fill", value))
         self.attrs["value"] = value
@@ -84,6 +87,13 @@ class FakeElement(object):
 
     def click(self):
         self.writes.append(("click", None))
+        # A click may change the page: the root carries the page's hook.
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        hook = getattr(root, "click_hook", None)
+        if hook is not None:
+            hook(self)
         return None
 
     def get_attribute(self, name):
@@ -417,9 +427,9 @@ def _matches_steps(element, steps):
 class FakePage(object):
     """A stand-in for a Playwright page, backed by a static HTML string."""
 
-    def __init__(self, html, url="https://example.invalid/cabinet", pages=None, on_scroll=None):
-        self.html = html
-        self.root = parse_html(html)
+    def __init__(
+        self, html, url="https://example.invalid/cabinet", pages=None, on_scroll=None, on_click=None
+    ):
         self.url = url
         self.visited = []
         self.waited_for = []
@@ -428,6 +438,18 @@ class FakePage(object):
         self.scrolls = []
         self._pages = list(pages or [])
         self._on_scroll = on_scroll
+        self._on_click = on_click
+        self._set_root(html)
+
+    def _set_root(self, html):
+        """Parse *html* and let every click on the new tree reach the hook."""
+        self.html = html
+        self.root = parse_html(html)
+        self.root.click_hook = self._dispatch_click
+
+    def _dispatch_click(self, element):
+        if self._on_click is not None:
+            self._on_click(self, element)
 
     # -- playwright-like API ---------------------------------------------
     def goto(self, url, **kwargs):
@@ -454,8 +476,7 @@ class FakePage(object):
         """
         self.scrolls.append(("scroll", dy))
         if self._pages:
-            self.html = self._pages.pop(0)
-            self.root = parse_html(self.html)
+            self._set_root(self._pages.pop(0))
         if self._on_scroll is not None:
             self._on_scroll(self)
         return None

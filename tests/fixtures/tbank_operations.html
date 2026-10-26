@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!--
+  SYNTHETIC fixture for the `tbank` profile — NOT a real T-Bank page.
+  Every merchant, category and amount below is invented for the test-suite of
+  bank-collector. There is no real bank, no real person and no real money in
+  it.
+
+  It mirrors the structure read from the live operations feed on 2026-10-27:
+  one <ul> whose <li> children are, in document order, either a DAY HEADER or
+  an OPERATION (siblings, not nested):
+
+    li                                    <- day header row
+      div[data-qa-type="atom-operations-feed-header"]
+        span[data-qa-type="atom-operations-feed-header-amount"]
+
+    li                                    <- operation row
+      div[data-qa-type="atom-operations-feed-operation-root"]
+        div[data-qa-type="atom-operations-feed-operation-title"]
+        div[data-qa-type="atom-operations-feed-operation-amount"]
+        div[data-qa-type="atom-operations-feed-operation-subtitle"]
+        div[data-qa-type="atom-operations-feed-operation-description"]  (optional)
+
+  Amounts use the Unicode minus sign (U+2212), as the cabinet does. The
+  header's total is glued to the date ("27 октября−1 234 ₽"), which the
+  `ru_date` parser must ignore.
+-->
+<html lang="ru">
+<body>
+<ul class="feed">
+  <li>
+    <div data-qa-type="atom-operations-feed-header">27 октября<span data-qa-type="atom-operations-feed-header-amount">−1 249 ₽</span></div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-operation-root" role="button" aria-label="Детали операции Магазин «Пример»">
+      <div data-qa-type="atom-operations-feed-operation-title">Магазин «Пример»</div>
+      <div data-qa-type="atom-operations-feed-operation-amount">−999 ₽</div>
+      <div data-qa-type="atom-operations-feed-operation-subtitle">Супермаркеты</div>
+      <div data-qa-type="atom-operations-feed-operation-description">Кэшбэк 5 ₽</div>
+    </div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-operation-root" role="button" aria-label="Детали операции Кофейня «Пример»">
+      <div data-qa-type="atom-operations-feed-operation-title">Кофейня «Пример»</div>
+      <div data-qa-type="atom-operations-feed-operation-amount">−250 ₽</div>
+      <div data-qa-type="atom-operations-feed-operation-subtitle">Кафе и рестораны</div>
+    </div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-header">26 октября<span data-qa-type="atom-operations-feed-header-amount">+9 999 ₽</span></div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-operation-root" role="button" aria-label="Детали операции Зарплата (тест)">
+      <div data-qa-type="atom-operations-feed-operation-title">Зарплата (тест)</div>
+      <div data-qa-type="atom-operations-feed-operation-amount">+9 999 ₽</div>
+      <div data-qa-type="atom-operations-feed-operation-subtitle">Переводы</div>
+    </div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-header">29 декабря 2025<span data-qa-type="atom-operations-feed-header-amount">−1 000 ₽</span></div>
+  </li>
+  <li>
+    <div data-qa-type="atom-operations-feed-operation-root" role="button" aria-label="Детали операции Старый магазин (тест)">
+      <div data-qa-type="atom-operations-feed-operation-title">Старый магазин (тест)</div>
+      <div data-qa-type="atom-operations-feed-operation-amount">−1 000 ₽</div>
+      <div data-qa-type="atom-operations-feed-operation-subtitle">Супермаркеты</div>
+    </div>
+  </li>
+</ul>
+</body>
+</html>

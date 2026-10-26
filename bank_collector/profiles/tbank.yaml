@@ -1,0 +1,81 @@
+# T-Bank (tbank.ru) — read-only profile for the operations feed.
+#
+# PROBED READ-ONLY on 2026-10-27 against an already logged-in desktop Chrome
+# session: the page was opened, read and scrolled with the mouse wheel only.
+# No click of any kind was made and no request of our own was sent — this
+# profile has no `load_more_text`, so the driver's only write action stays off.
+#
+# The feed is ONE <ul> whose <li> children are, in document order, either a
+# day header or an operation (siblings, not nested):
+#
+#   li  -> [data-qa-type=atom-operations-feed-header]            (day header)
+#          text like "27 октября−1 234 ₽"; the day total lives in
+#          [data-qa-type=atom-operations-feed-header-amount]
+#   li  -> [data-qa-type=atom-operations-feed-operation-root]    (operation)
+#          role=button, aria-label "Детали операции <merchant>", with
+#          ...-operation-title / -amount / -subtitle / -description
+#
+# That is a flat feed with day headers: the record uses `header` (not
+# `items`), so `row` matches both kinds of <li> and every operation inherits
+# the date of the preceding header. The date is parsed by `parse: ru_date`
+# ("27 октября", "Сегодня", "Вчера", an optional year; the day total after
+# the date is ignored).
+#
+# The list is VIRTUALISED: while scrolling, the number of rendered operations
+# stays around 25–31 — old rows are removed from the DOM and older ones are
+# appended (infinite scroll, no button). A day header can therefore scroll
+# out of the DOM while some of its operations are still rendered; those rows
+# have no date in that pass and are skipped silently (they were read in an
+# earlier round, while their header was still there) and counted in the
+# scroll report as `headerless_rows`.
+#
+# `step_px` is smaller than the ~1100 px viewport on purpose, so consecutive
+# rounds overlap and no row can slip between two scroll steps. `settle_ms` is
+# generous because the virtualised list re-renders asynchronously.
+#
+# status: draft — the structure above was probed by reading the live page,
+# but the end-to-end run (dates, sign of every amount, reaching
+# stop_before_date with complete: true) has not been checked yet. Move it to
+# `verified` only after comparing the report with the cabinet by eye.
+#
+# Balances are not described yet: this profile reads the operations page
+# only. Balances come in a later step (other page / other markup).
+bank: tbank
+status: draft
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain; those rows are skipped in that pass and counted in scroll.headerless_rows. The scroll step is smaller than the viewport so rounds overlap. status: draft — the markup was read from the live page, the end-to-end numbers were not verified yet."
+url: "https://www.tbank.ru/mybank/operations/"
+wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
+
+balances: []
+
+transactions:
+  - # Every row of the feed, in document order: both the day headers and the
+    # operations. The selector is the list's own <li>s, narrowed to the two
+    # kinds of child the feed renders.
+    row: "ul > li:has([data-qa-type=atom-operations-feed-header]), ul > li:has([data-qa-type=atom-operations-feed-operation-root])"
+    header:
+      selector: "[data-qa-type=atom-operations-feed-header]"
+      fields:
+        date:
+          selector: "[data-qa-type=atom-operations-feed-header]"
+          # "27 октября−1 234 ₽" -> 2026-10-27 (a year is inferred when the
+          # text has none; anything after the date is ignored).
+          parse: ru_date
+    fields:
+      title:
+        selector: "[data-qa-type=atom-operations-feed-operation-title]"
+      category:
+        selector: "[data-qa-type=atom-operations-feed-operation-subtitle]"
+      amount:
+        selector: "[data-qa-type=atom-operations-feed-operation-amount]"
+      # The description is optional (cashback text and the like): a row
+      # without it must not produce a warning of its own.
+      description:
+        selector: "[data-qa-type=atom-operations-feed-operation-description]"
+        optional: true
+    scroll:
+      max_rounds: 400
+      step_px: 800
+      settle_ms: 1500
+      stop_after_empty_rounds: 6
+      stop_before_date: "2026-01-01"

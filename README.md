@@ -10,8 +10,9 @@ one container that holds the record's rows; it is pressed only when scrolling ad
 exactly one such `<button>` is there, so that the list renders its next page. A same-label control
 outside the list is never clicked. Nothing else is clicked. Data stays local (git-ignored `data/`).
 Banks are added as YAML profiles; today `alfa` is verified against a live cabinet, including the
-load-more click and its scope (verified live on 2026-10-26), and `example` is a synthetic profile
-used by the tests.
+load-more click and its scope (verified live on 2026-10-26), `tbank` is a read-only draft whose
+operations feed was probed live on 2026-10-27 (no clicks; numbers not verified end to end), and
+`example` is a synthetic profile used by the tests.
 
 ---
 
@@ -89,6 +90,15 @@ bank-collector --bank alfa
 |---|---|---|---|
 | `example` | verified (синтетика) | остатки, операции | — (фикстура в тестах) |
 | `alfa` | **verified, 2026-10-24** | остатки по продуктам с главной, операции с `/history/` | да, живой кабинет в desktop Chrome |
+| `tbank` | **draft** | операции с `/mybank/operations/` (лента с заголовками дней, виртуализированный список) | разметка прочитана с живой страницы 2026-10-27 (только `goto`, чтение и колесо — без кликов); сквозные числа ещё не сверены |
+
+Что именно читает `tbank`: на `https://www.tbank.ru/mybank/operations/` — лента операций, где
+заголовок дня и операции лежат соседними `<li>` одного `<ul>`; дата берётся у заголовка
+(`parse: ru_date`: «27 октября», «Сегодня», «Вчера», год выводится относительно даты запуска).
+Список виртуализированный: при прокрутке старые строки исчезают из DOM, а заголовок дня может
+уехать раньше своих операций — такие операции пропускаются в этом проходе и учитываются в
+`scroll.headerless_rows` (в предыдущих проходах они уже прочитаны). Остатков в профиле пока нет,
+и никаких кликов он не делает: `load_more_text` не задан.
 
 Что именно читает `alfa`: на `web.alfabank.ru/dashboard/` — блоки продуктов с суммой (рекламные
 блоки без суммы пропускаются), на `web.alfabank.ru/history/` — операции, сгруппированные по дням
@@ -98,7 +108,9 @@ bank-collector --bank alfa
 итогов.
 
 «unverified» значит ровно то, что написано: профиль не проверяли на реальном кабинете, и он,
-скорее всего, не заработает без правки селекторов. Мы не выдаём непроверенное за рабочее.
+скорее всего, не заработает без правки селекторов. «draft» — разметка уже прочитана с живой
+страницы (селекторы сняты и структура понятна), но сквозной запуск с сверкой чисел ещё не сделан.
+Мы не выдаём непроверенное за рабочее.
 
 ## Секретный код кабинета (не СМС)
 

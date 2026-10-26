@@ -507,7 +507,7 @@ def _scroll_section(
     if scroll_by is None:
         # The page cannot scroll — nothing is done, and it is said so.
         info = {"rounds": 0, "rows": len(rows), "stop": "no-scroll", "oldest_date": _oldest_date(rows)}
-        _warn_if_short(warnings, section_name, info, scroll_def.get("stop_before_date"))
+        _judge_completeness(warnings, section_name, info, scroll_def.get("stop_before_date"))
         return rows, info
 
     max_rounds = scroll_def["max_rounds"]
@@ -573,27 +573,38 @@ def _scroll_section(
 
     _append_scroll_warnings(warnings, scrolled_warnings)
     info = {"rounds": rounds, "rows": len(rows), "stop": stop, "oldest_date": _oldest_date(rows)}
-    _warn_if_short(warnings, section_name, info, stop_before)
+    _judge_completeness(warnings, section_name, info, stop_before)
     return rows, info
 
 
-def _warn_if_short(warnings, section_name, info, stop_before):
-    """Say so when the history ends later than the profile asked for.
+def _judge_completeness(warnings, section_name, info, stop_before):
+    """Set ``info["complete"]`` and say so when the history is short.
 
-    A list that stopped growing (``empty``), a broken scroll (``error``) or a
-    page that cannot scroll may simply not have rendered the older rows yet;
-    without this warning such a run would look like a complete history. The
-    round limit has a warning of its own.
+    The history is complete when an older row than *stop_before* was seen
+    (``date``) or when the list stopped growing at a row of that day or
+    older. A list that stopped growing too early (``empty``), a broken
+    scroll (``error``) or a page that cannot scroll may simply not have
+    rendered the older rows yet; without this flag such a run would look
+    like a complete history. Without *stop_before* only a list that stopped
+    growing counts as complete. The round limit has a warning of its own.
     """
-    if not stop_before or info["stop"] in ("date", "limit"):
-        return
+    stop = info["stop"]
     oldest = info.get("oldest_date")
-    if oldest is not None and oldest <= stop_before:
+    if stop == "date":
+        info["complete"] = True
         return
-    warnings.append(
-        "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
-        % (section_name, oldest or "no dated row", stop_before, info["stop"])
-    )
+    if stop == "limit":
+        info["complete"] = False
+        return
+    if not stop_before:
+        info["complete"] = stop == "empty"
+        return
+    info["complete"] = oldest is not None and oldest <= stop_before
+    if not info["complete"]:
+        warnings.append(
+            "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
+            % (section_name, oldest or "no dated row", stop_before, stop)
+        )
 
 
 def extract_section(
@@ -639,8 +650,9 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     ``warnings``. ``source_urls`` lists every page that was opened, in order.
     When a record asked for scrolling, the dict also holds a ``scroll`` key
     (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
-    "no-scroll", "oldest_date": "YYYY-MM-DD"|None}``) that tells how the
-    scroll ended and how far back it reached.
+    "no-scroll", "oldest_date": "YYYY-MM-DD"|None, "complete": bool}``)
+    that tells how the scroll ended, how far back it reached and whether
+    that is the whole history the profile asked for.
     """
     warnings = []
     url = profile["url"]

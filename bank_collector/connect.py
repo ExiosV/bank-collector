@@ -39,6 +39,24 @@ _HINT = (
 )
 
 
+def _viewport(page):
+    """The ``(width, height)`` of the viewport, or ``None`` when unknown.
+
+    A page of a browser attached over CDP emulates no viewport, so
+    Playwright's ``viewport_size`` is ``None`` there; the window is then
+    asked for its inner size — a read of two numbers, nothing is changed.
+    """
+    size = getattr(page, "viewport_size", None)
+    if size and size.get("width") and size.get("height"):
+        return size["width"], size["height"]
+    try:
+        width, height = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+    except Exception:
+        return None
+    if width and height:
+        return width, height
+    return None
+
 
 def _wheel(page, dy):
     """Turn the mouse wheel over the middle of the viewport.
@@ -48,10 +66,11 @@ def _wheel(page, dy):
     list that may scroll inside its own container. Moving the pointer is a
     hover, not a click: it stays read-only.
     """
-    size = getattr(page, "viewport_size", None)
-    if size and size.get("width") and size.get("height"):
-        page.mouse.move(size["width"] / 2, size["height"] / 2)
+    size = _viewport(page)
+    if size:
+        page.mouse.move(size[0] / 2, size[1] / 2)
     return page.mouse.wheel(0, int(dy))
+
 
 class BrowserUnavailable(Exception):
     """Raised when no browser could be attached to."""

@@ -46,7 +46,7 @@ EXIT_OK = 0
 EXIT_NO_BROWSER = 2
 EXIT_BAD_PROFILE = 3
 EXIT_NOTHING = 4
-EXIT_SHORTER = 5
+EXIT_INCOMPLETE = 5
 
 #: The line that is printed on stdout when the code screen was handled.
 UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
@@ -173,39 +173,47 @@ def _print_profiles(stream=sys.stdout):
         stream.write("%-16s %-12s %s\n" % (profile["name"], profile.get("status") or "?", profile.get("bank")))
 
 
-def _shorter_than_before(report, path):
-    """True when *report* would replace a fuller snapshot at *path*.
+def _incomplete(report):
+    """True when the report scrolled but did not reach the whole history."""
+    scroll = report.get("scroll")
+    return bool(scroll) and not scroll.get("complete")
 
-    A run whose scroll did not reach the date of the profile (``stop`` other
-    than ``date``) may be a partial pull of a slow cabinet. It must not
-    overwrite yesterday's longer history: the daily job would trade a year
-    for a screen. A run that reached the date is complete and always wins.
+
+def _would_lose_history(report, path):
+    """True when writing *report* to *path* would replace a fuller snapshot.
+
+    A run that is not proven complete must not overwrite yesterday's longer
+    history: the daily job would trade a year for a screen. That covers a
+    scroll that stopped short, a ``--no-scroll`` run over a file that was
+    scrolled, and a run that extracted nothing. A complete run always wins,
+    and a bank without scrolling (its count of rows changes every day) is
+    never held back.
     """
-    scroll = report.get("scroll") or {}
-    if not scroll or scroll.get("stop") == "date":
+    if (report.get("scroll") or {}).get("complete"):
         return False
     try:
         with open(path, "r", encoding="utf-8") as handle:
             previous = json.load(handle)
     except (OSError, ValueError):
         return False
-    previous_rows = previous.get("transactions") if isinstance(previous, dict) else None
-    if not isinstance(previous_rows, list):
+    if not isinstance(previous, dict) or not isinstance(previous.get("transactions"), list):
         return False
-    return len(previous_rows) > len(report.get("transactions") or [])
+    if len(previous["transactions"]) <= len(report.get("transactions") or []):
+        return False
+    nothing = not report.get("balances") and not report.get("transactions")
+    return _incomplete(report) or bool(previous.get("scroll")) or nothing
 
 
 def _write_outputs(report, out_dir, formats, bank):
     """Write the report; return ``(paths, kept)``.
 
-    *kept* is the path of a fuller snapshot that was left in place: the new,
-    shorter report then goes to ``<bank>.partial.json`` and nothing else is
-    written.
+    *kept* is the path of a fuller snapshot that was left in place: the new
+    report then goes to ``<bank>.partial.json`` and nothing else is written.
     """
     os.makedirs(out_dir, exist_ok=True)
     if formats in ("json", "both"):
         path = os.path.join(out_dir, "%s.json" % bank)
-        if _shorter_than_before(report, path):
+        if _would_lose_history(report, path):
             partial = os.path.join(out_dir, "%s.partial.json" % bank)
             report_mod.write_json(report, partial)
             return [partial], path
@@ -470,11 +478,19 @@ def main(argv=None):
             return EXIT_NOTHING
         if kept:
             sys.stderr.write(
-                "shorter history than the snapshot already in %s (%d transactions, scroll stop: %s): "
-                "it was kept, the new report is in %s\n"
-                % (kept, len(report["transactions"]), report["scroll"].get("stop"), written[0])
+                "the snapshot already in %s holds a longer history than this run "
+                "(%d transactions): it was kept, the new report is in %s\n"
+                % (kept, len(report["transactions"]), written[0])
             )
-            return EXIT_SHORTER
+            return EXIT_INCOMPLETE
+        if _incomplete(report):
+            scroll = report["scroll"]
+            sys.stderr.write(
+                "history incomplete: it reaches back only to %s (scroll stop: %s); "
+                "the report was written, but the run is not a success\n"
+                % (scroll.get("oldest_date") or "no dated row", scroll.get("stop"))
+            )
+            return EXIT_INCOMPLETE
         return EXIT_OK
     finally:
         # Close the tab we opened ourselves, and never the person's browser.

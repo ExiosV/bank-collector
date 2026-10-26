@@ -2,22 +2,33 @@
 
 import json
 
-from bank_collector.cli import _write_outputs
+from bank_collector.cli import _incomplete, _write_outputs
 
 
-def _report(rows, stop):
-    return {
+def _report(rows, stop=None):
+    report = {
         "bank": "alfa",
         "balances": [],
         "transactions": [{"n": index} for index in range(rows)],
         "warnings": [],
-        "scroll": {"rounds": 3, "rows": rows, "stop": stop, "oldest_date": "2026-09-01"},
     }
+    if stop is not None:
+        report["scroll"] = {
+            "rounds": 3,
+            "rows": rows,
+            "stop": stop,
+            "oldest_date": "2026-09-01",
+            "complete": stop == "date",
+        }
+    return report
 
 
-def _write_previous(tmp_path, rows):
+def _write_previous(tmp_path, rows, scrolled=True):
     path = tmp_path / "alfa.json"
-    path.write_text(json.dumps({"transactions": [{"n": index} for index in range(rows)]}))
+    previous = {"transactions": [{"n": index} for index in range(rows)]}
+    if scrolled:
+        previous["scroll"] = {"stop": "date", "complete": True}
+    path.write_text(json.dumps(previous))
     return path
 
 
@@ -56,3 +67,38 @@ def test_the_first_run_writes_the_file(tmp_path):
 
     assert kept is None
     assert written == [str(tmp_path / "alfa.json")]
+
+
+def test_a_no_scroll_run_does_not_replace_a_scrolled_history(tmp_path):
+    previous = _write_previous(tmp_path, 300)
+
+    written, kept = _write_outputs(_report(20), str(tmp_path), "json", "alfa")
+
+    assert kept == str(previous)
+    assert len(json.loads(previous.read_text())["transactions"]) == 300
+
+
+def test_an_empty_run_does_not_replace_the_file(tmp_path):
+    previous = _write_previous(tmp_path, 5, scrolled=False)
+
+    written, kept = _write_outputs(_report(0), str(tmp_path), "both", "alfa")
+
+    assert kept == str(previous)
+    assert written == [str(tmp_path / "alfa.partial.json")]
+    assert not (tmp_path / "alfa-transactions.csv").exists()
+
+
+def test_a_bank_without_scrolling_is_not_held_back(tmp_path):
+    """The first screen of a bank without scrolling changes every day."""
+    previous = _write_previous(tmp_path, 20, scrolled=False)
+
+    written, kept = _write_outputs(_report(19), str(tmp_path), "json", "alfa")
+
+    assert kept is None
+    assert len(json.loads(previous.read_text())["transactions"]) == 19
+
+
+def test_an_unfinished_scroll_is_never_a_success():
+    assert _incomplete(_report(20, "empty")) is True
+    assert _incomplete(_report(20, "date")) is False
+    assert _incomplete(_report(20)) is False, "no scroll, nothing to judge"

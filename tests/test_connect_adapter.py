@@ -222,3 +222,32 @@ def test_the_wheel_turns_over_the_middle_of_the_viewport():
 
     assert raw.mouse.moves == [(640, 400)]
     assert raw.mouse.wheels == [(0, 1200)]
+
+
+def test_without_an_emulated_viewport_the_window_size_is_read():
+    """Attached over CDP, Playwright reports no viewport: ask the window."""
+    raw = FakePlaywrightPage("https://example.invalid/history/")
+    raw.viewport_size = None
+    raw.evaluated = []
+
+    def evaluate(script):
+        raw.evaluated.append(script)
+        return [1000, 600]
+
+    raw.evaluate = evaluate
+
+    PageAdapter(raw).scroll_by(1200)
+
+    assert raw.evaluated == ["() => [window.innerWidth, window.innerHeight]"]
+    assert raw.mouse.moves == [(500, 300)]
+    assert raw.mouse.wheels == [(0, 1200)]
+
+
+def test_an_unknown_viewport_still_turns_the_wheel():
+    raw = FakePlaywrightPage("https://example.invalid/history/")
+    raw.viewport_size = None
+
+    PageAdapter(raw).scroll_by(1200)
+
+    assert raw.mouse.moves == []
+    assert raw.mouse.wheels == [(0, 1200)]

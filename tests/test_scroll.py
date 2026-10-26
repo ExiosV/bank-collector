@@ -152,6 +152,7 @@ def test_the_scroll_limit_is_reported_with_a_warning():
 
     assert result["scroll"]["stop"] == "limit"
     assert result["scroll"]["rounds"] == 2
+    assert result["scroll"]["complete"] is False
     assert result["scroll"]["rows"] == 3, "the first screen plus two rounds"
     assert _warnings(result) == [
         "transactions: scroll limit reached after 2 rounds (3 rows, history may be incomplete)"
@@ -178,6 +179,7 @@ def test_the_scrolling_stops_at_the_date_of_the_profile():
 
     assert result["scroll"]["stop"] == "date"
     assert result["scroll"]["oldest_date"] == "2025-12-31"
+    assert result["scroll"]["complete"] is True
     assert _dates(result) == ["2026-03-01", "2025-12-31"]
     assert _warnings(result) == []
 
@@ -194,6 +196,7 @@ def test_a_row_on_the_date_itself_does_not_stop_the_scrolling():
 
     assert _dates(result) == ["2026-03-01", "2026-01-01", "2026-01-01"]
     assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["complete"] is True
     assert _warnings(result) == [], "the history reached the date: it is complete"
 
 
@@ -204,6 +207,7 @@ def test_a_list_that_stops_short_of_the_date_is_reported():
 
     assert result["scroll"]["stop"] == "empty"
     assert result["scroll"]["oldest_date"] == "2026-03-01"
+    assert result["scroll"]["complete"] is False
     assert _warnings(result) == [
         "transactions: history reaches back only to 2026-03-01, not to 2026-01-01 "
         "(stop: empty, history may be incomplete)"

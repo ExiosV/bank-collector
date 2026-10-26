@@ -509,21 +509,28 @@ def _collapsed(text):
     return " ".join(str(text or "").split())
 
 
-def _load_more_buttons(container, load_more_text):
-    """The buttons of *container* whose whole text is exactly *load_more_text*.
+def _same_label(element, label_folded):
+    """True when the whole text of *element* equals the label case-insensitively."""
+    try:
+        text = element.text_content()
+    except Exception:  # pragma: no cover - a re-render can kill a handle
+        return False
+    return _collapsed(text).casefold() == label_folded
 
-    The text of a button is compared stripped and whitespace-collapsed, so a
-    label that is wrapped over two lines still matches. Only ``<button>``
-    elements inside the container are considered; a link or a div that happens
-    to carry the text is never pressed.
+
+def _load_more_buttons(container, load_more_text):
+    """The buttons of *container* whose whole text is *load_more_text*.
+
+    The text of a button is compared stripped, whitespace-collapsed and
+    case-folded, so a label that is wrapped over two lines or typed in a
+    different case still matches. Only ``<button>`` elements inside the
+    container are considered; a link or a div that happens to carry the text
+    is never pressed.
     """
+    folded = _collapsed(load_more_text).casefold()
     matches = []
     for element in container.query_all("button"):
-        try:
-            text = element.text_content()
-        except Exception:  # pragma: no cover - a re-render can kill a handle
-            continue
-        if _collapsed(text) == load_more_text:
+        if _same_label(element, folded):
             matches.append(element)
     return matches
 
@@ -541,23 +548,53 @@ def _load_more_containers(page, record_def, load_more_scope):
     ]
 
 
-def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
-    """How many same-label controls were not clickable under the rules.
+def _text_only_label_count(scope, label_folded):
+    """How many text-only ``div``/``span`` elements under *scope* carry the label.
 
-    Counts every ``button``/``[role=button]``/``a`` with the configured whole
-    text on the page, then subtracts the ``<button>`` elements that sit inside
-    the one valid list container. A positive number means the history may be
-    incomplete: the list offered no clickable button, but a same-label control
-    existed elsewhere (an offers block) or as a link.
+    Only an element with no element children counts: a wrapper whose text is
+    the label plus its children is the container of a control, not an inert
+    lookalike.  Counting without identity comparisons also lets the caller
+    subtract the ones that live inside a matching control.
     """
-    total = 0
-    for element in page.query_all("button, [role=button], a"):
+    count = 0
+    for element in scope.query_all("div, span"):
         try:
+            if element.query_all("*"):
+                continue
             text = element.text_content()
         except Exception:  # pragma: no cover - a re-render can kill a handle
             continue
-        if _collapsed(text) == load_more_text:
-            total += 1
+        if _collapsed(text).casefold() == label_folded:
+            count += 1
+    return count
+
+
+def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
+    """How many same-label controls were not clickable under the rules.
+
+    Counts every same-label control on the page — ``button``/``[role=button]``
+    /``a`` and also a plain text-only ``div`` or ``span`` (an inert widget can
+    look exactly like a button), case-insensitively — then subtracts the
+    ``<button>`` elements that sit inside the one valid list container. A
+    positive number means the history may be incomplete: the list offered no
+    clickable button, but a same-label control existed elsewhere (an offers
+    block) or as a link/div.
+    """
+    folded = _collapsed(load_more_text).casefold()
+    controls = [
+        element
+        for element in page.query_all("button, [role=button], a")
+        if _same_label(element, folded)
+    ]
+    total = len(controls)
+
+    # A plain div/span can carry the label without being a button.  A span
+    # inside a matching button is part of that button, not a second control,
+    # so those are subtracted.
+    text_only = _text_only_label_count(page, folded)
+    for control in controls:
+        text_only -= _text_only_label_count(control, folded)
+    total += max(text_only, 0)
     if not total:
         return 0
 

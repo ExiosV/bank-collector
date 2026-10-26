@@ -15,9 +15,12 @@ Exit codes
 ``--import-statement PATH`` reads a statement the owner downloaded by hand
 from the cabinet. It needs ``--bank`` and no browser: the file is read from
 the local disk only, and the report is written to
-``<out>/<bank>-statement.json`` (never ``<bank>.json``). Exit code 3 means
-an unknown bank, an unreadable file or a missing column; 4 means the export
-is empty.
+``<out>/<bank>-statement.json`` (never ``<bank>.json``); with ``--format csv``
+or ``both`` the transactions also go to
+``<out>/<bank>-statement-transactions.csv``. Exit code 3 means an unknown
+bank, an unreadable file, a file that is not a UTF-8 CSV export (cp1251,
+PDF/Excel), a missing column or rows of which none could be read; 4
+means the export is empty.
 
 The tool never asks for a password, an SMS code or a cookie, and it never
 logs in. It only reads the page that is already open in *your* browser.
@@ -73,13 +76,14 @@ def build_parser():
         prog="bank-collector",
         description=(
             "Read your own bank cabinet in a browser you already logged into. "
-            "Read-only: no login, no credentials, no fills. There are exactly two "
-            "narrow, explicitly enabled clicks: the history list's own 'load more' "
-            "button — a profile may name it (scroll.load_more_text) together with the "
-            "list container it lives in (scroll.load_more_scope), and it is pressed "
-            "only when scrolling added no rows and exactly one such <button> is inside "
-            "that container — and --enter-code's one answer to the cabinet's static "
-            "'secret code' screen (not an SMS code), from a file of mode 0600."
+            "Read-only: no login and no credentials; the only fill is --enter-code's "
+            "answer to the cabinet's static 'secret code' screen (not an SMS code), "
+            "from a file of mode 0600. There are exactly two narrow, explicitly "
+            "enabled clicks: the history list's own 'load more' button — a profile "
+            "may name it (scroll.load_more_text) together with the list container it "
+            "lives in (scroll.load_more_scope), and it is pressed only when scrolling "
+            "added no rows and exactly one such <button> is inside that container — "
+            "and --enter-code's one press of the screen's submit button."
         ),
         epilog=(
             "Examples:\n"
@@ -438,10 +442,18 @@ def _import_statement(args):
 
     The report goes to ``<out>/<bank>-statement.json`` — never to
     ``<bank>.json``, so a statement can never be mistaken for a cabinet run
-    (and never replaces the fuller snapshot protection of one).
+    (and never replaces the fuller snapshot protection of one).  With
+    ``--format csv`` or ``both`` the transactions are also written to
+    ``<bank>-statement-transactions.csv``; the JSON is written for ``json``
+    and ``both`` (the default).
     """
     # Imported here so that the browser path stays free of the CSV parser.
-    from .statement import EmptyStatementError, StatementError, read_statement
+    from .statement import (
+        WARNING_SAMPLE,
+        EmptyStatementError,
+        StatementError,
+        read_statement,
+    )
 
     try:
         collected = read_statement(args.bank, args.import_statement)
@@ -450,15 +462,27 @@ def _import_statement(args):
         return EXIT_NOTHING
     except StatementError as exc:
         sys.stderr.write("statement error: %s\n" % exc)
+        # When rows were present but none could be read, say which lines and
+        # columns failed — without the values themselves.
+        for warning in getattr(exc, "warnings", [])[:WARNING_SAMPLE]:
+            sys.stderr.write("warning: %s\n" % warning)
         return EXIT_BAD_PROFILE
 
     report = report_mod.build_report(collected)
     report["statement"] = collected["statement"]
 
     os.makedirs(args.out, exist_ok=True)
-    path = os.path.join(args.out, "%s-statement.json" % args.bank)
-    report_mod.write_json(report, path)
-    sys.stdout.write("written: %s\n" % path)
+    written = []
+    if args.format in ("json", "both"):
+        path = os.path.join(args.out, "%s-statement.json" % args.bank)
+        report_mod.write_json(report, path)
+        written.append(path)
+    if args.format in ("csv", "both"):
+        path = os.path.join(args.out, "%s-statement-transactions.csv" % args.bank)
+        report_mod.write_csv(report["transactions"], path)
+        written.append(path)
+    for path in written:
+        sys.stdout.write("written: %s\n" % path)
 
     statement = report["statement"]
     period = statement["period"]
@@ -491,6 +515,8 @@ def main(argv=None):
             parser.error("--enter-code cannot be used with --import-statement")
         if args.cdp_url != DEFAULT_CDP_URL:
             parser.error("--cdp-url cannot be used with --import-statement")
+        if args.as_json or args.as_csv:
+            parser.error("--json/--csv cannot be used with --import-statement")
         return _import_statement(args)
 
     if not args.bank:

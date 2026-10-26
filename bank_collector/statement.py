@@ -13,20 +13,32 @@ added::
         "file": "alfa_statement.csv",
         "rows": 8,
         "period": ["2026-09-28", "2026-10-05"],
-        "accounts": ["Альфа-Счёт на минимальный остаток", "МИР"]
+        "accounts": ["Альфа-Счёт на минимальный остаток", "МИР"],
+        "own_transfers": 0
     }
+
+Every transaction also carries a leaf-free boolean ``own_transfer``: two rows
+of the same statement on the same operation date with the same absolute
+amount, opposite types and different account numbers are a transfer between
+the owner's own accounts.  Such rows are kept (never dropped) but should be
+excluded from income/expense totals.  The statement block's ``own_transfers``
+counts the marked rows (both sides of each pair).
 
 Privacy rules of the import:
 
 * the full account number and the full card number are **never** stored —
   only the last four digits of the account number (``account_last4``) and
   the card *name* (``card``);
+* every run of 12 or more digits (spaces and dashes allowed inside; masked
+  card runs such as ``220015******1234`` count too) is masked in every stored
+  text leaf and in the stored file name as ``***`` plus the last four digits;
 * an unreadable row is reported by its line number and the column name,
   never by its values;
 * a warning about an unknown operation type names the type only.
 """
 
 import csv
+import io
 import os
 import re
 from datetime import datetime, timezone
@@ -36,6 +48,7 @@ __all__ = [
     "StatementError",
     "EmptyStatementError",
     "EMPTY_EXPORT_MESSAGE",
+    "BAD_CSV_MESSAGE",
     "STATEMENT_PARSERS",
     "read_statement",
     "read_alfa_statement",
@@ -47,9 +60,25 @@ EMPTY_EXPORT_MESSAGE = (
     "choose all accounts and export again"
 )
 
+#: What a file that is not the bank's UTF-8 CSV export gets.  A cp1251 file,
+#: a PDF or an XLSX renamed to ``.csv`` and a file with NUL bytes all land here.
+BAD_CSV_MESSAGE = (
+    "not a UTF-8 CSV export from the bank — export again as CSV, "
+    "or the file is PDF/Excel"
+)
+
 
 class StatementError(Exception):
-    """The statement cannot be read: unknown bank, bad file, missing columns."""
+    """The statement cannot be read: unknown bank, bad file, missing columns.
+
+    ``warnings`` carries the per-row warnings of a parse that read rows but
+    could not turn any of them into an operation, so the CLI can print the
+    first few of them next to the error.
+    """
+
+    def __init__(self, message, warnings=None):
+        Exception.__init__(self, message)
+        self.warnings = list(warnings or [])
 
 
 class EmptyStatementError(StatementError):
@@ -99,19 +128,57 @@ ALFA_REQUIRED_COLUMNS = (
 OUTGOING = "Списание"
 INCOMING = "Пополнение"
 
+#: The statuses the import keeps.  A real export writes an empty status on
+#: every incoming row and ``Выполнен`` on completed outgoing ones; anything
+#: else (``Отклонён``, ``В обработке``) is not settled money and is skipped.
+ACCEPTED_STATUSES = ("", "Выполнен")
+
 #: How many digits of the account number are kept (the rest is never stored).
 LAST4 = 4
 
+#: How many per-line warnings the CLI prints next to "none of the N rows".
+WARNING_SAMPLE = 5
+
+#: One "number-ish" run: digits with spaces, dashes or asterisks inside.
+#: Dots and commas are deliberately absent, so dates and amounts never match.
+_NUMBER_RUN_RE = re.compile(r"(?<![\d*])\d[\d\s*\-]*\d(?![\d*])")
+
+#: The shortest plain digit run that is treated as an account/card number.
+_LONG_NUMBER_DIGITS = 12
+
+
+def _mask_number_run(match):
+    """Mask one candidate run: ``***`` plus its last four digits.
+
+    A plain run is masked when it holds at least 12 digits (spaces and dashes
+    inside count as part of the run).  A masked card run such as
+    ``220015******1234`` has only 10 digits but is masked as well.
+    """
+    run = match.group(0)
+    digits = re.sub(r"\D", "", run)
+    if len(digits) >= _LONG_NUMBER_DIGITS or ("*" in run and len(digits) >= 8):
+        return "***" + digits[-LAST4:]
+    return run
+
+
+def _mask_digits(text):
+    """Mask long digit runs (account/card numbers) inside *text*."""
+    return _NUMBER_RUN_RE.sub(_mask_number_run, text)
+
 
 def _text_leaf(raw):
-    """A text field in the leaf shape of :func:`collect.normalise_value`."""
-    text = "" if raw is None else str(raw)
+    """A text field in the leaf shape of :func:`collect.normalise_value`.
+
+    Long digit runs are masked in both ``raw`` and ``value``: a comment or a
+    merchant that happens to carry an account number must not store it.
+    """
+    text = _mask_digits("" if raw is None else str(raw))
     return {"raw": text, "value": text.strip(), "currency": None, "money": False}
 
 
 def _account_leaf(raw):
     """An account label with the NBSP the cabinet writes collapsed to a space."""
-    text = "" if raw is None else str(raw)
+    text = _mask_digits("" if raw is None else str(raw))
     return {
         "raw": text,
         "value": text.replace("\xa0", " ").strip(),
@@ -169,20 +236,35 @@ def _account_last4(raw):
 def _read_rows(path):
     """Read the CSV as ``[(line_number, row)]``, skipping the blank lines.
 
-    The file is UTF-8 **with a BOM** in the observed export, so it is read
-    with ``utf-8-sig``.  ``reader.line_num`` is the physical line of the row,
+    The file must be the bank's UTF-8 CSV export (with a BOM in the observed
+    export, so it is decoded with ``utf-8-sig``).  A cp1251 file, a PDF or
+    XLSX renamed to ``.csv`` and a file with NUL bytes are rejected with one
+    clear message instead of leaking a ``UnicodeDecodeError`` or a
+    ``csv.Error``.  ``reader.line_num`` is the physical line of the row,
     which is what the warnings point at.
     """
     try:
-        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle)
-            rows = []
-            for row in reader:
-                if any(str(cell).strip() for cell in row):
-                    rows.append((reader.line_num, row))
-            return rows
+        with open(path, "rb") as handle:
+            raw = handle.read()
     except OSError as exc:
         raise StatementError("cannot read the statement %s: %s" % (path, exc))
+
+    if b"\x00" in raw:
+        raise StatementError(BAD_CSV_MESSAGE)
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise StatementError(BAD_CSV_MESSAGE)
+
+    rows = []
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""))
+        for row in reader:
+            if any(str(cell).strip() for cell in row):
+                rows.append((reader.line_num, row))
+    except csv.Error:
+        raise StatementError(BAD_CSV_MESSAGE)
+    return rows
 
 
 def _split_header(rows):
@@ -211,10 +293,41 @@ def _row_value(row, header):
     }
 
 
+def _mark_own_transfers(transactions, meta):
+    """Flag transfers between the owner's own accounts.
+
+    A pair is two rows of the same statement on the same operation date with
+    the same absolute amount, opposite types (``Списание`` / ``Пополнение``)
+    and different account numbers.  Both rows get ``own_transfer = True``;
+    nothing is dropped.  The account number is used locally only — the stored
+    row keeps only ``account_last4``.
+    """
+    outgoing = {}
+    incoming = {}
+    for index, item in enumerate(meta):
+        key = (item["date"], item["amount"])
+        if item["type"] == OUTGOING:
+            outgoing.setdefault(key, []).append(index)
+        elif item["type"] == INCOMING:
+            incoming.setdefault(key, []).append(index)
+
+    for key, out_indexes in outgoing.items():
+        in_indexes = incoming.get(key)
+        if not in_indexes:
+            continue
+        for out_index in out_indexes:
+            for in_index in in_indexes:
+                if meta[out_index]["account"] != meta[in_index]["account"]:
+                    transactions[out_index]["own_transfer"] = True
+                    transactions[in_index]["own_transfer"] = True
+
+
 def read_alfa_statement(path):
     """Parse the Alfa-Bank CSV export.
 
-    Returns ``{"transactions", "warnings", "accounts"}``.  A row with a
+    Returns ``{"transactions", "warnings", "accounts", "period",
+    "own_transfers"}``.  A row with a status other than an empty one or
+    ``Выполнен`` is skipped with one warning per distinct status; a row with a
     malformed date or amount is skipped with a warning that names only its
     line number and the column; an unknown operation type keeps the amount
     positive and warns once per distinct type.
@@ -228,14 +341,22 @@ def read_alfa_statement(path):
         )
 
     transactions = []
+    meta = []
     warnings = []
     accounts = set()
     unknown_types = []
+    skipped_statuses = {}
     period_start = None
     period_end = None
 
     for line, row in data:
         record = _row_value(row, header)
+
+        status_raw = record.get("status", "")
+        status_text = str(status_raw).strip()
+        if status_text not in ACCEPTED_STATUSES:
+            skipped_statuses[status_text] = skipped_statuses.get(status_text, 0) + 1
+            continue
 
         operation_raw = record.get("operationDate", "")
         operation_iso = _iso_date(operation_raw)
@@ -313,6 +434,17 @@ def read_alfa_statement(path):
                     "currency": currency,
                     "money": True,
                 },
+                # Set after the whole file is read (see _mark_own_transfers).
+                "own_transfer": False,
+            }
+        )
+        # Kept aside for the own-transfer pairing; never written to the report.
+        meta.append(
+            {
+                "date": operation_iso,
+                "amount": abs(amount),
+                "type": type_text,
+                "account": str(record.get("accountNumber", "")).strip(),
             }
         )
 
@@ -321,14 +453,27 @@ def read_alfa_statement(path):
         if period_end is None or operation_iso > period_end:
             period_end = operation_iso
 
+    for status_text, count in skipped_statuses.items():
+        warnings.append(
+            "%d rows with status %r skipped" % (count, status_text)
+        )
+
     if not transactions:
-        raise EmptyStatementError(EMPTY_EXPORT_MESSAGE)
+        error = StatementError(
+            "none of the %d rows could be read" % len(data), warnings=warnings
+        )
+        raise error
+
+    _mark_own_transfers(transactions, meta)
 
     return {
         "transactions": transactions,
         "warnings": warnings,
         "accounts": sorted(accounts),
         "period": [period_start, period_end],
+        "own_transfers": sum(
+            1 for transaction in transactions if transaction["own_transfer"]
+        ),
     }
 
 
@@ -342,7 +487,9 @@ def read_statement(bank, path, now=None):
     The returned dict carries ``bank``, ``status`` (``"statement"``),
     ``source_url`` / ``source_urls`` (``file:<basename>``), ``fetched_at``,
     empty ``balances``, the parsed ``transactions``, ``warnings`` and the
-    ``statement`` block (file, row count, period, accounts).
+    ``statement`` block (file, row count, period, accounts, own transfers).
+    Long digit runs in the stored file name are masked just like those in the
+    parsed text leaves.
     """
     parser = STATEMENT_PARSERS.get(bank)
     if parser is None:
@@ -356,7 +503,7 @@ def read_statement(bank, path, now=None):
     fetched_at = now.isoformat().replace("+00:00", "Z")
 
     parsed = parser(path)
-    basename = os.path.basename(path)
+    basename = _mask_digits(os.path.basename(path))
     source = "file:%s" % basename
 
     return {
@@ -373,5 +520,6 @@ def read_statement(bank, path, now=None):
             "rows": len(parsed["transactions"]),
             "period": parsed["period"],
             "accounts": parsed["accounts"],
+            "own_transfers": parsed["own_transfers"],
         },
     }

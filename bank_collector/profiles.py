@@ -198,20 +198,19 @@ _SCROLL_KEYS = (
 #: The only labels the driver may ever press.  A profile cannot smuggle in
 #: "Скачать выписку", "Оплатить" or any other button by naming it here: the
 #: label is compared case-insensitively after whitespace collapsing against
-#: this allowlist, and anything else is a profile error.
+#: this allowlist, and anything else is a profile error.  It is deliberately
+#: narrow: the owner-approved label and its orthographic variant only.
 _LOAD_MORE_LABELS = (
     "Показать ещё",
     "Показать еще",
-    "Загрузить ещё",
-    "Загрузить еще",
-    "Ещё",
-    "Еще",
-    "Show more",
-    "Load more",
 )
 
-#: The allowlist folded for a case-insensitive comparison.
-_LOAD_MORE_LABELS_FOLDED = frozenset(label.casefold() for label in _LOAD_MORE_LABELS)
+#: The canonical spelling for every case-folded allowlist label.  A profile
+#: may type any casing; the canonical spelling is stored, and the runtime
+#: comparison case-folds both sides.
+_LOAD_MORE_LABELS_BY_FOLDED = {
+    label.casefold(): label for label in _LOAD_MORE_LABELS
+}
 
 #: The values used when the profile does not say otherwise.
 _SCROLL_DEFAULTS = {
@@ -466,15 +465,17 @@ def _normalise_scroll(index, scroll, where):
                 "%s: record #%d: 'scroll.load_more_text' must be a non-empty string"
                 % (where, index)
             )
-        # Compared with the whitespace-collapsed text of a button.
+        # Compared with the whitespace-collapsed text of a button, and stored
+        # in the allowlist's own spelling so the profile reads canonically.
         collapsed = " ".join(load_more_text.split())
-        if collapsed.casefold() not in _LOAD_MORE_LABELS_FOLDED:
+        canonical = _LOAD_MORE_LABELS_BY_FOLDED.get(collapsed.casefold())
+        if canonical is None:
             raise ProfileError(
                 "%s: record #%d: 'scroll.load_more_text' must be one of the known "
                 "load-more labels (%s), got %r"
                 % (where, index, ", ".join(_LOAD_MORE_LABELS), collapsed)
             )
-        result["load_more_text"] = collapsed
+        result["load_more_text"] = canonical
 
     load_more_scope = scroll.get("load_more_scope")
     if load_more_scope is not None:

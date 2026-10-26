@@ -7,12 +7,19 @@
 # read as well (down to stop_before_date). Scrolling only moves the viewport.
 # The one click besides the code screen is the list's own «Показать ещё»
 # button (owner-approved 2026-10-26): it is pressed only when scrolling added
-# nothing and exactly one button carries that whole text, and it only asks
-# the list to append its next rows. "Скачать выписку" is never pressed, no
-# statement is downloaded and no request of our own is sent.
+# nothing, the load_more_scope selector names exactly one list container that
+# holds operation cells, and exactly one button inside it carries that whole
+# text — it only asks the list to append its next rows. "Скачать выписку" is
+# never pressed, no statement is downloaded and no request of our own is sent.
+#
+# HONEST LIMIT (2026-10-26): the load-more click AND its scope selector were
+# NOT yet checked against the live cabinet — they were added on 2026-10-26 and
+# are verified only with tests. Everything else below (the dashboard, the
+# /history/ operations, the read-only scrolling) was checked live on
+# 2026-10-24, which is what status: verified refers to.
 bank: alfa
 status: verified
-notes: "Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the operations list of /history/, which is scrolled (read-only) down to the date in scroll.stop_before_date. The list's «Показать ещё» button is the only click besides the code screen: it is pressed only when exactly one such button exists and it only appends rows of the list. No statement is downloaded and no request of our own is sent. The 'common balance' widget is not the sum of the product cards, so the profile reads the cards and ignores it."
+notes: "Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the operations list of /history/, which is scrolled (read-only) down to the date in scroll.stop_before_date. HONEST LIMIT (2026-10-26): the list's «Показать ещё» click and its load_more_scope selector were added on 2026-10-26 and are NOT yet checked against the live cabinet — they are verified only with tests. The click only ever happens inside the one container the scope names, only when exactly one <button> there carries that whole text, and it only appends rows of the list. No statement is downloaded and no request of our own is sent. The 'common balance' widget is not the sum of the product cards, so the profile reads the cards and ignores it."
 url: "https://web.alfabank.ru/dashboard/"
 wait_for: "[data-test-id=common-balance-button]"
 
@@ -43,12 +50,16 @@ transactions:
           selector: "[data-test-id=transaction-status]"
     # The history list shows 20 operations per screen, appends the next ones
     # while it is scrolled and then offers a «Показать ещё» button. Scrolling
-    # is read-only; once a scroll round adds nothing, that one button (whole
-    # text match, only if exactly one exists) may be pressed — the only click
-    # besides the code screen, approved by the owner on 2026-10-26 — and it
-    # only appends rows of the list. A slow cabinet gets about 7 s (6 empty
-    # rounds x 1.2 s) to append rows before the list counts as finished;
-    # stopping short of stop_before_date is a warning.
+    # is read-only; once a scroll round adds nothing, that one button may be
+    # pressed — the only click besides the code screen, approved by the owner
+    # on 2026-10-26 — and it only appends rows of the list. The button is
+    # searched ONLY inside the container named by load_more_scope (the list
+    # whose direct child is the untagged load-more button and which holds the
+    # operation cells), so a same-label control of an offers block can never
+    # be pressed. Scope and click are NOT yet checked against the live
+    # cabinet (added 2026-10-26, verified only with tests). A slow cabinet
+    # gets about 7 s (6 empty rounds x 1.2 s) to append rows before the list
+    # counts as finished; stopping short of stop_before_date is a warning.
     scroll:
       max_rounds: 200
       step_px: 1200
@@ -56,6 +67,7 @@ transactions:
       stop_after_empty_rounds: 6
       stop_before_date: "2026-01-01"
       load_more_text: "Показать ещё"
+      load_more_scope: "div:has(> button:not([data-test-id])):has(button[data-test-id=operation-cell])"
       max_clicks: 100
 
 # The cabinet's static "secret code" screen (NOT an SMS code): after a long

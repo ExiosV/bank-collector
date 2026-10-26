@@ -3,7 +3,9 @@
 Alfa-Bank shows 20 operations per screen and then a «Показать ещё» button.
 Scrolling alone never reaches the older rows, so a profile may name that one
 button. These tests pin down when it is pressed and — just as important —
-when it is not, and that no other control is ever touched.
+when it is not: the button is searched only inside the one list container
+named by ``scroll.load_more_scope``, only an allowlisted whole text may be
+pressed, and no other control is ever touched.
 """
 
 import os
@@ -20,6 +22,9 @@ from fake_page import FakePage, parse_html  # noqa: E402
 
 DATE_FORMAT = "%sT10:00:00.000+0300"
 LOAD_MORE = "Показать ещё"
+
+#: The list container the tests scope the button to.
+SCOPE = "div.operations"
 
 #: The beginning of a profile with a scrollable record; tests append keys.
 _PROFILE_PREFIX = (
@@ -38,22 +43,40 @@ _PROFILE_PREFIX = (
 )
 
 
-def _history(days, extra_html=""):
-    """An Alfa-like history page: one group per day, one operation per group."""
-    parts = ["<html><body><div class='operations'>"]
-    for date, title, amount in days:
-        parts.append(
-            "<div>"
-            "<div data-date='%s'><span>день</span></div>"
-            "<button data-test-id='operation-cell'>"
-            "<div data-test-id='title-text_content'>%s</div>"
-            "<div data-test-id='transaction-category-name'>Прочее</div>"
-            "<div data-test-id='transaction-status'>%s ₽</div>"
-            "</button></div>" % (DATE_FORMAT % date, title, amount)
-        )
-    parts.append(extra_html)
-    parts.append("</div></body></html>")
-    return "".join(parts)
+def _group(date, title, amount):
+    """One Alfa-like day group: a date element and an operation button."""
+    return (
+        "<div>"
+        "<div data-date='%s'><span>день</span></div>"
+        "<button data-test-id='operation-cell'>"
+        "<div data-test-id='title-text_content'>%s</div>"
+        "<div data-test-id='transaction-category-name'>Прочее</div>"
+        "<div data-test-id='transaction-status'>%s ₽</div>"
+        "</button></div>" % (DATE_FORMAT % date, title, amount)
+    )
+
+
+def _list(*days):
+    """One list container holding the groups of *days*."""
+    return "<div class='operations'>%s</div>" % "".join(_group(*day) for day in days)
+
+
+def _history(days, extra_html="", outside_html=""):
+    """An Alfa-like history page: one group per day, one operation per group.
+
+    *extra_html* lands inside the list container (where the cabinet puts its
+    own «Показать ещё» button); *outside_html* is a sibling of the list, for
+    a same-label control of another widget (an offers block).
+    """
+    return (
+        "<html><body>"
+        "<div class='operations'>"
+        + "".join(_group(*day) for day in days)
+        + extra_html
+        + "</div>"
+        + outside_html
+        + "</body></html>"
+    )
 
 
 def _day(number, title="Оплата", amount="-100,00"):
@@ -65,10 +88,12 @@ def _load_more_button():
 
 
 def _append_days(page, days):
-    """Append operation groups to the page, like an SPA does after a click."""
-    fragment = parse_html(_history(days))
-    for group in fragment.query_all("div:has(> [data-date])"):
-        page.root.append_child(group)
+    """Append operation groups to the list, like an SPA does after a click."""
+    fragment = parse_html("".join(_group(*day) for day in days))
+    containers = page.query_all("div.operations")
+    target = containers[0] if containers else page.root
+    for group in list(fragment.children):
+        target.append_child(group)
 
 
 def _record(scroll):
@@ -106,6 +131,7 @@ def _scroll(**overrides):
         "stop_after_empty_rounds": 2,
         "stop_before_date": None,
         "load_more_text": LOAD_MORE,
+        "load_more_scope": SCOPE,
         "max_clicks": 100,
     }
     config.update(overrides)
@@ -181,6 +207,7 @@ def test_without_the_button_the_list_ends_normally():
 
     assert result["scroll"]["stop"] == "empty"
     assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["load_more_missing"] >= 1, "the list had no button"
     assert page.writes == [], "there was nothing to click"
 
 
@@ -228,12 +255,107 @@ def test_the_feature_off_never_clicks_the_button():
     page = FakePage(_history([_day(1)], _load_more_button()))
 
     result = collect(
-        page, _profile(_scroll(load_more_text=None, stop_after_empty_rounds=2))
+        page,
+        _profile(
+            _scroll(
+                load_more_text=None,
+                load_more_scope=None,
+                stop_after_empty_rounds=2,
+            )
+        ),
     )
 
     assert result["scroll"]["stop"] == "empty"
     assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["load_more_missing"] == 0, "the feature is off"
     assert page.writes == [], "without load_more_text the button is just a button"
+
+
+# ---------------------------------------------------------------------------
+# The guards: scope, whole-text equality and "only when scrolling stopped"
+# ---------------------------------------------------------------------------
+
+
+def test_a_superstring_button_inside_the_scope_is_not_clicked():
+    """The whole text must be equal — "Показать ещё 5" is a different label."""
+    page = FakePage(
+        _history([_day(1)], "<button class='load-more'>Показать ещё 5</button>")
+    )
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a superstring must not be pressed"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["load_more_missing"] >= 1
+
+
+def test_the_button_is_not_clicked_while_scrolling_still_adds_rows():
+    """The click waits until a whole scroll round added nothing."""
+
+    def grow(page):
+        if len(page.scrolls) <= 3:
+            _append_days(page, [_day(10 + len(page.scrolls))])
+
+    clicks_at = []
+    page = FakePage(
+        _history([_day(1)], _load_more_button()),
+        on_scroll=grow,
+        on_click=lambda page, element: clicks_at.append(len(page.scrolls)),
+    )
+
+    result = collect(page, _profile(_scroll(stop_after_empty_rounds=1)))
+
+    assert clicks_at == [4], "clicked only after the 4th scroll added no rows"
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["rows"] == 4, "the first screen plus three scrolled rows"
+    assert result["scroll"]["stop"] == "empty"
+
+
+def test_a_same_label_button_outside_the_scope_is_never_clicked():
+    """An offers block with the same label must not be pressed."""
+    offers = "<div class='offers'><button>Показать ещё</button></div>"
+    page = FakePage(_history([_day(1)], outside_html=offers))
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a button outside the list is never clicked"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["complete"] is False, "the list may be hiding its next page"
+    assert _warnings(result) == [
+        "transactions: 'Показать ещё' found outside the list or not as a button (1), "
+        "not clicked — history may be incomplete"
+    ]
+
+
+def test_a_scope_matching_no_container_never_clicks():
+    page = FakePage(_history([_day(1)], _load_more_button()))
+
+    result = collect(page, _profile(_scroll(load_more_scope="div.absent")))
+
+    assert page.writes == []
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "error"
+    assert _warnings(result) == [
+        "transactions: load-more scope 'div.absent' matched 0 list containers, "
+        "none clicked"
+    ]
+
+
+def test_a_scope_matching_two_containers_never_clicks():
+    html = "<html><body>%s%s</body></html>" % (_list(_day(1)), _list(_day(2)))
+    page = FakePage(html)
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == []
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "error"
+    assert _warnings(result) == [
+        "transactions: load-more scope 'div.operations' matched 2 list containers, "
+        "none clicked"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -247,13 +369,46 @@ def test_load_more_text_must_be_a_non_empty_string(tmp_path, value):
         _load(tmp_path, "bad_text", "      load_more_text: %s\n" % value)
 
 
+@pytest.mark.parametrize("label", ["Скачать выписку", "Оплатить", "Перевести"])
+def test_load_more_text_must_be_an_allowed_label(tmp_path, label):
+    with pytest.raises(ProfileError, match="load-more labels"):
+        _load(
+            tmp_path,
+            "bad_label",
+            '      load_more_text: "%s"\n      load_more_scope: "%s"\n' % (label, SCOPE),
+        )
+
+
+def test_load_more_text_requires_a_scope(tmp_path):
+    with pytest.raises(ProfileError, match="load_more_scope"):
+        _load(tmp_path, "no_scope", '      load_more_text: "%s"\n' % LOAD_MORE)
+
+
+def test_load_more_scope_requires_a_text(tmp_path):
+    with pytest.raises(ProfileError, match="load_more_scope"):
+        _load(tmp_path, "scope_only", '      load_more_scope: "%s"\n' % SCOPE)
+
+
+def test_the_allowlisted_label_is_matched_case_insensitively(tmp_path):
+    profile = _load(
+        tmp_path,
+        "folded",
+        '      load_more_text: "показать ЕЩЁ"\n      load_more_scope: "%s"\n' % SCOPE,
+    )
+
+    assert (
+        profile["transactions"][0]["scroll"]["load_more_text"] == "показать ЕЩЁ"
+    ), "the collapsed canonical string is kept for matching"
+
+
 @pytest.mark.parametrize("value", ["0", "-3", "true", "'5'"])
 def test_max_clicks_must_be_a_positive_integer(tmp_path, value):
     with pytest.raises(ProfileError, match="max_clicks"):
         _load(
             tmp_path,
             "bad_clicks",
-            '      load_more_text: "%s"\n      max_clicks: %s\n' % (LOAD_MORE, value),
+            '      load_more_text: "%s"\n      load_more_scope: "%s"\n'
+            "      max_clicks: %s\n" % (LOAD_MORE, SCOPE, value),
         )
 
 
@@ -262,6 +417,7 @@ def test_the_new_keys_have_defaults(tmp_path):
     scroll = profile["transactions"][0]["scroll"]
 
     assert scroll["load_more_text"] is None, "the click is off unless a profile asks"
+    assert scroll["load_more_scope"] is None
     assert scroll["max_clicks"] == 100
 
 
@@ -269,4 +425,5 @@ def test_the_alfa_profile_names_the_load_more_button():
     scroll = load_profile("alfa")["transactions"][0]["scroll"]
 
     assert scroll["load_more_text"] == LOAD_MORE
+    assert scroll["load_more_scope"], "a scope is required with the label"
     assert scroll["max_clicks"] == 100

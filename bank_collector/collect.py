@@ -4,8 +4,10 @@ The driver only ever *reads* an already rendered DOM. It never types, never
 submits a form and never touches a downloading button. Its one write is an
 optional, narrowly scoped click on the list's own "load more" button (see
 ``scroll.load_more_text`` below): it is made only when scrolling added no new
-rows and exactly one button carries exactly the configured text, and it only
-asks the list to render its next page.
+rows, the ``scroll.load_more_scope`` selector names exactly one list container
+that holds rows of the record, and exactly one button inside that container
+carries exactly the configured text — it only asks the list to render its next
+page.
 
 The driver talks to a tiny protocol so that it can be tested without a
 browser (see ``tests/fake_page.py``) while still driving real Playwright
@@ -46,8 +48,8 @@ list (read-only) and reads the rows that the cabinet appends while the list
 is scrolled, until the list stops growing, the date limit of the profile is
 reached or the round limit is hit. When scrolling a round added no new rows
 and the record names a ``load_more_text``, the driver may press the single
-button with exactly that text: the click only asks the list to render its
-next page.
+button with exactly that text inside the one container named by
+``load_more_scope``: the click only asks the list to render its next page.
 """
 
 import re
@@ -507,16 +509,16 @@ def _collapsed(text):
     return " ".join(str(text or "").split())
 
 
-def _load_more_buttons(page, load_more_text):
-    """The buttons whose whole text is exactly *load_more_text*.
+def _load_more_buttons(container, load_more_text):
+    """The buttons of *container* whose whole text is exactly *load_more_text*.
 
     The text of a button is compared stripped and whitespace-collapsed, so a
     label that is wrapped over two lines still matches. Only ``<button>``
-    elements are considered; a link or a div that happens to carry the text
-    is never pressed.
+    elements inside the container are considered; a link or a div that happens
+    to carry the text is never pressed.
     """
     matches = []
-    for element in page.query_all("button"):
+    for element in container.query_all("button"):
         try:
             text = element.text_content()
         except Exception:  # pragma: no cover - a re-render can kill a handle
@@ -524,6 +526,45 @@ def _load_more_buttons(page, load_more_text):
         if _collapsed(text) == load_more_text:
             matches.append(element)
     return matches
+
+
+def _load_more_containers(page, record_def, load_more_scope):
+    """The containers matching *load_more_scope* that hold rows of the record.
+
+    A scope that also matches a wrapper without rows (or the whole page) is
+    therefore not counted: only a real list container is.
+    """
+    return [
+        container
+        for container in page.query_all(load_more_scope)
+        if container.query_all(record_def["row"])
+    ]
+
+
+def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
+    """How many same-label controls were not clickable under the rules.
+
+    Counts every ``button``/``[role=button]``/``a`` with the configured whole
+    text on the page, then subtracts the ``<button>`` elements that sit inside
+    the one valid list container. A positive number means the history may be
+    incomplete: the list offered no clickable button, but a same-label control
+    existed elsewhere (an offers block) or as a link.
+    """
+    total = 0
+    for element in page.query_all("button, [role=button], a"):
+        try:
+            text = element.text_content()
+        except Exception:  # pragma: no cover - a re-render can kill a handle
+            continue
+        if _collapsed(text) == load_more_text:
+            total += 1
+    if not total:
+        return 0
+
+    clickable = 0
+    for container in _load_more_containers(page, record_def, load_more_scope):
+        clickable += len(_load_more_buttons(container, load_more_text))
+    return max(total - clickable, 0)
 
 
 def _absorb_round(page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms):
@@ -566,14 +607,19 @@ def _scroll_section(
 
     Scrolling itself is read-only: the viewport moves and no request of our
     own is sent. When a round added no new rows and the record names a
-    ``load_more_text``, the driver looks for buttons whose whole text equals
-    that string. Exactly one match is pressed (the click only asks the list
-    to render its next page); no match is a normal empty round; several
-    matches are never pressed and stop the run with an error.
+    ``load_more_text``, the driver first resolves ``load_more_scope`` to the
+    one list container that holds rows of the record; only buttons inside
+    that container whose whole text equals the configured string are
+    considered. Exactly one match is pressed (the click only asks the list to
+    render its next page); no match is a normal empty round; several matches
+    — or zero/several containers — are never pressed and stop the run with an
+    error.
 
     Returns ``(rows, info)``, where *info* says how many rounds were made,
     how many rows were collected in total, how many load-more clicks were
-    made (always 0 when the feature is off) and why the scrolling stopped.
+    made (always 0 when the feature is off), how many empty rounds found no
+    matching button in the list (``load_more_missing``) and why the scrolling
+    stopped.
     """
     scroll_by = getattr(page, "scroll_by", None)
     if scroll_by is None:
@@ -584,6 +630,7 @@ def _scroll_section(
             "stop": "no-scroll",
             "oldest_date": _oldest_date(rows),
             "clicks": 0,
+            "load_more_missing": 0,
         }
         _judge_completeness(warnings, section_name, info, scroll_def.get("stop_before_date"))
         return rows, info
@@ -594,6 +641,7 @@ def _scroll_section(
     stop_after_empty = scroll_def["stop_after_empty_rounds"]
     stop_before = scroll_def["stop_before_date"]
     load_more_text = scroll_def.get("load_more_text")
+    load_more_scope = scroll_def.get("load_more_scope")
     max_clicks = scroll_def.get("max_clicks", 100)
 
     # How many times each operation has been kept so far. A key may repeat:
@@ -604,6 +652,7 @@ def _scroll_section(
     rounds = 0
     clicks = 0
     empty_rounds = 0
+    load_more_missing = 0
     stop = "empty"
     scrolled_warnings = []
 
@@ -632,9 +681,18 @@ def _scroll_section(
 
         # Scrolling added nothing: the list may end here or offer one button
         # that renders its next page. The button is the only thing ever
-        # clicked by the driver.
+        # clicked by the driver, and it is searched only inside the one list
+        # container named by ``load_more_scope``.
         if load_more_text:
-            buttons = _load_more_buttons(page, load_more_text)
+            containers = _load_more_containers(page, record_def, load_more_scope)
+            if len(containers) != 1:
+                warnings.append(
+                    "%s: load-more scope %r matched %d list containers, none clicked"
+                    % (section_name, load_more_scope, len(containers))
+                )
+                stop = "error"
+                break
+            buttons = _load_more_buttons(containers[0], load_more_text)
             if len(buttons) > 1:
                 warnings.append(
                     "%s: %d buttons named %r, none clicked"
@@ -671,6 +729,10 @@ def _scroll_section(
                     empty_rounds = 0
                     continue
                 # A click that added no rows falls through to an empty round.
+            else:
+                # The list showed no matching button this round. Counted so
+                # the report can say how often the click was unavailable.
+                load_more_missing += 1
 
         empty_rounds += 1
         if empty_rounds >= stop_after_empty:
@@ -687,8 +749,25 @@ def _scroll_section(
         "stop": stop,
         "oldest_date": _oldest_date(rows),
         "clicks": clicks,
+        "load_more_missing": load_more_missing,
     }
     _judge_completeness(warnings, section_name, info, stop_before)
+
+    # A list that ended without a clickable button but does show the same
+    # label elsewhere (an offers block, a link) may be hiding its next page.
+    # This only ever turns ``complete`` from True to False.
+    if load_more_text and info["stop"] == "empty":
+        foreign = _foreign_load_more_count(
+            page, record_def, load_more_scope, load_more_text
+        )
+        if foreign:
+            warnings.append(
+                "%s: %r found outside the list or not as a button (%d), not clicked "
+                "— history may be incomplete"
+                % (section_name, load_more_text, foreign)
+            )
+            info["complete"] = False
+
     return rows, info
 
 
@@ -766,9 +845,10 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     When a record asked for scrolling, the dict also holds a ``scroll`` key
     (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
     "no-scroll", "oldest_date": "YYYY-MM-DD"|None, "clicks": K,
-    "complete": bool}``) that tells how the scroll ended, how far back it
-    reached, how many load-more clicks it made and whether that is the whole
-    history the profile asked for.
+    "load_more_missing": E, "complete": bool}``) that tells how the scroll
+    ended, how far back it reached, how many load-more clicks it made, how
+    many empty rounds found no matching button in the list container and
+    whether that is the whole history the profile asked for.
     """
     warnings = []
     url = profile["url"]

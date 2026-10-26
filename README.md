@@ -4,11 +4,14 @@
 over CDP: no login automation, no passwords, no SMS codes, no clicks on "download statement",
 "pay" or "transfer". There are only two narrow, opt-in write actions: `--enter-code` answers the
 cabinet's static "secret code" prompt with a code read from a 0600 file, and a profile may name the
-list's own "load more" button (`scroll.load_more_text`), which is pressed only when scrolling added
-no rows and exactly one button carries that exact text, so that the list renders its next page.
-Nothing else is clicked. Data stays local (git-ignored `data/`). Banks are added as YAML profiles;
-today `alfa` is verified against a live cabinet and `example` is a synthetic profile used by the
-tests.
+list's own "load more" button (`scroll.load_more_text`) together with its list container
+(`scroll.load_more_scope`, required). The button must carry an allowlisted label and live inside the
+one container that holds the record's rows; it is pressed only when scrolling added no rows and
+exactly one such `<button>` is there, so that the list renders its next page. A same-label control
+outside the list is never clicked. Nothing else is clicked. Data stays local (git-ignored `data/`).
+Banks are added as YAML profiles; today `alfa` is verified against a live cabinet (except the
+load-more click and its scope, added 2026-10-26 and verified only with tests) and `example` is a
+synthetic profile used by the tests.
 
 ---
 
@@ -34,9 +37,9 @@ tests.
 прокрутка уже отрисованного списка. Кликает он ровно в двух узких случаях: необязательный
 `--enter-code` отвечает на экран постоянного «Секретного кода» (см. ниже), а кнопка
 «Показать ещё» нажимается, только если её полный текст совпадает с `scroll.load_more_text`
-профиля и на странице ровно одна такая кнопка (она лишь дописывает строки списка; см.
-«Прокрутка»). Оба случая включаются явно — флагом или строкой в профиле — и не трогают
-никакие другие кнопки.
+профиля, лежит в контейнере `scroll.load_more_scope` (обязателен) и она там ровно одна (она лишь
+дописывает строки списка; см. «Прокрутка»). Кнопка с той же подписью вне списка не нажимается.
+Оба случая включаются явно — флагом или строкой в профиле — и не трогают никакие другие кнопки.
 
 ## Установка и запуск
 
@@ -129,22 +132,37 @@ bank-collector --bank alfa --cdp-url ... --enter-code
   отправляются, кнопка «Скачать выписку» не трогается. Альфа отдаёт по 20 операций за раз, поэтому
   без прокрутки в отчёт попали бы только 20 самых свежих операций, а с прокруткой — весь год до
   `2026-01-01`.
-- **Одна кнопка «Показать ещё».** Если прокрутка не добавила ни одной новой строки, а в профиле
-  задан `scroll.load_more_text`, скрипт ищет среди `<button>` те, чей **весь** текст (без
-  крайних пробелов, внутренние пробелы схлопнуты) в точности равен этой строке. Нажимается она,
-  только если такая кнопка **ровно одна**; клик лишь просит список дописать следующую порцию
-  строк. Ноль совпадений — обычный пустой раунд (список мог закончиться); две и больше — клика
-  нет, в `warnings` пишется `N buttons named '…', none clicked`, прокрутка останавливается с
-  `stop: error`. `scroll.max_clicks` (по умолчанию 100) ограничивает число таких кликов; каждый
-  клик считается раундом и расходует `scroll.max_rounds`. Другие кнопки («Скачать выписку»,
+- **Одна кнопка «Показать ещё».** Она включается только парой ключей: `scroll.load_more_text`
+  (сам текст) и `scroll.load_more_scope` (CSS-селектор контейнера списка). Без скоупа профиль
+  отклоняется; скоуп без текста — тоже. Если прокрутка не добавила ни одной новой строки,
+  драйвер оставляет только контейнеры скоупа, которые содержат хоть одну строку этой записи;
+  их должно быть **ровно один**, иначе клика нет, в `warnings` пишется `load-more scope '…'
+  matched N list containers, none clicked`, прокрутка останавливается с `stop: error` (код `5`).
+  Кнопка ищется **только внутри этого контейнера**, среди `<button>`, и её **весь** текст (без
+  крайних пробелов, внутренние пробелы схлопнуты) должен **в точности** совпадать со строкой —
+  не «содержать» её. Текст обязан входить в белый список: «Показать ещё», «Показать еще»,
+  «Загрузить ещё», «Загрузить еще», «Ещё», «Еще», «Show more», «Load more» (регистр не важен);
+  «Скачать выписку», «Оплатить» и любая другая строка — ошибка профиля. Нажимается кнопка,
+  только если она в контейнере **ровно одна**; клик лишь просит список дописать следующую
+  порцию строк. Две и больше — клика нет, предупреждение `N buttons named '…', none clicked`,
+  `stop: error` (код `5`); ноль — обычный пустой раунд. Кнопка с той же подписью **вне** списка
+  (блок офферов) или не `<button>` (ссылка, `[role=button]`) не нажимается никогда; если
+  прокрутка закончилась пустым раундом, а такая кнопка на странице есть, пишется предупреждение
+  «… found outside the list or not as a button (N), not clicked — history may be incomplete» и
+  `complete` принудительно становится `false` (код `5`), чтобы не перезаписать более полный
+  снапшот. `scroll.max_clicks` (по умолчанию 100) ограничивает число таких кликов; каждый клик
+  считается раундом и расходует `scroll.max_rounds`. Другие кнопки («Скачать выписку»,
   «Оплатить», «Перевести») не нажимаются никогда, страницы перечисления не переключаются.
+  **Клик и скоуп против живого кабинета ещё не проверялись** (добавлены 2026-10-26, проверены
+  только тестами).
 - **Как отключить прокрутку**: флаг `--no-scroll` (только первый экран, как раньше) или убрать
   блок `scroll:` из профиля банка. Настройки прокрутки — в профиле: `scroll.max_rounds` (шагов,
   по умолчанию 50), `scroll.step_px` (пикселей за шаг, 1500), `scroll.settle_ms` (пауза после
   шага, 800), `scroll.stop_after_empty_rounds` (стоп после стольких пустых шагов, 3),
   `scroll.stop_before_date` (YYYY-MM-DD: стоп, как только встретилась дата раньше этой — сам этот
   день собирается целиком), `scroll.load_more_text` (необязательный полный текст кнопки догрузки,
-  по умолчанию выключено) и `scroll.max_clicks` (потолок кликов по ней, 100).
+  по умолчанию выключено), `scroll.load_more_scope` (обязательный селектор контейнера списка, если
+  текст задан) и `scroll.max_clicks` (потолок кликов по ней, 100).
 - **Неполная история не выдаётся за полную**: если список перестал расти раньше
   `stop_before_date`, в `warnings` будет «history reaches back only to …», а в блоке `scroll`
   отчёта — `oldest_date`, самая старая собранная дата, `clicks`, сколько раз нажималась кнопка

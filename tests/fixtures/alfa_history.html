@@ -10,6 +10,11 @@
     div                                     <- the group (row of the profile)
       div[data-date="..."]                  <- the day
       button[data-test-id="operation-cell"] <- an operation (item)
+
+  The list container also holds the untagged «Показать ещё» button as its
+  direct child: that is what the profile's load_more_scope names (a container
+  whose direct child is a button without data-test-id and that holds
+  operation cells). Everything here is synthetic.
 -->
 <html lang="ru">
 <body>
@@ -53,6 +58,7 @@
       </section>
     </button>
   </div>
+  <button type="button" class="load-more">Показать ещё</button>
 </div>
 </body>
 </html>

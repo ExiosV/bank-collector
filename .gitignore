@@ -4,8 +4,10 @@ data/
 *.json.gz
 
 # Synthetic statement fixtures are the only CSVs that may be committed:
-# they hold invented rows, never the owner's data.
-!tests/fixtures/*.csv
+# they hold invented rows, never the owner's data.  List them explicitly so a
+# real export cannot slip into the repository under another name.
+!tests/fixtures/alfa_statement.csv
+!tests/fixtures/alfa_statement_empty.csv
 
 # Снапшоты страниц
 snapshots/

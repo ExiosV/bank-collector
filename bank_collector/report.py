@@ -3,7 +3,7 @@
 The JSON document is the artefact of this tool::
 
     {
-      "schema_version": "1",
+      "schema_version": "2",
       "bank": "example",
       "status": "verified",
       "source_url": "https://example.invalid/cabinet",
@@ -22,6 +22,13 @@ the provenance of that scroll:
                  "oldest_date": "2025-12-31", "complete": true}
     }
 
+An imported statement adds the ``statement`` block (file, rows, period,
+accounts, ``own_transfers``, ``own_transfer_pairs``) and its rows carry
+``own_transfer``/``own_transfer_reason``/``own_transfer_pair``; both are
+optional and absent from a cabinet run.  Version 2 only adds optional
+statement keys to version 1 — everything a version 1 reader knows is
+unchanged.
+
 Everything is written to the local disk by the caller. Nothing is sent
 anywhere: this module has no network code at all.
 """
@@ -38,7 +45,7 @@ __all__ = [
     "flatten",
 ]
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def build_report(collected, schema_version=SCHEMA_VERSION):

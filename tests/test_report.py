@@ -33,6 +33,11 @@ def _collected():
     }
 
 
+def test_schema_version_is_two():
+    """v2 only adds optional statement keys to v1; nothing v1 knew changed."""
+    assert SCHEMA_VERSION == "2"
+
+
 def test_build_report_has_the_documented_keys():
     report = build_report(_collected())
     assert report["schema_version"] == SCHEMA_VERSION

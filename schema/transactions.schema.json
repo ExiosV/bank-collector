@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/ExiosV/bank-collector/schema/transactions.schema.json",
   "title": "bank-collector transaction entry",
-  "description": "One operation row as extracted from a bank cabinet page.",
+  "description": "One operation row as extracted from a bank cabinet page or imported from a statement export. A row from a cabinet run has date/amount/payee and whatever fields its profile names; a row from a statement import also carries the fixed statement fields declared below, including the own-transfer markers.",
   "type": "object",
   "properties": {
     "date": {
@@ -25,6 +25,89 @@
         { "$ref": "#/definitions/field" },
         { "type": "null" }
       ]
+    },
+    "transaction_date": {
+      "description": "Statement import: posting date, ISO in value; value is null when the export's date could not be parsed.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "title": {
+      "description": "Statement import: merchant, else comment, else the operation type.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "category": {
+      "description": "Statement import: the bank's category of the operation.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "type": {
+      "description": "Statement import: Списание (money out) or Пополнение (money in).",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "status": {
+      "description": "Statement import: the export's status of the operation.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "comment": {
+      "description": "Statement import: the export's comment column.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "mcc": {
+      "description": "Statement import: the merchant category code.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "card": {
+      "description": "Statement import: the card name only — never the card number.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "account": {
+      "description": "Statement import: the account name, NBSP collapsed.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "account_last4": {
+      "description": "Statement import: the last four digits of the account number — never the full number.",
+      "oneOf": [
+        { "$ref": "#/definitions/field" },
+        { "type": "null" }
+      ]
+    },
+    "own_transfer": {
+      "description": "Statement import: true when the bank itself marked the row as a transfer between the owner's own accounts (category \"Между своими счетами\" or a title starting \"Перевод себе\"). Exclude such rows from income/expense totals.",
+      "type": "boolean"
+    },
+    "own_transfer_reason": {
+      "description": "Statement import: which bank signal flagged the row — \"category\", \"title\", or an empty string when it was not flagged.",
+      "type": "string",
+      "enum": ["", "category", "title"]
+    },
+    "own_transfer_pair": {
+      "description": "Statement import: the short id (\"p1\", \"p2\", …) of the 1:1 pair this flagged row belongs to, or an empty string when it has no counterpart in the statement.",
+      "type": "string"
     }
   },
   "additionalProperties": {

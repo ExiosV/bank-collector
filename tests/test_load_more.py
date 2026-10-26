@@ -200,6 +200,23 @@ def test_only_the_load_more_button_is_clicked():
     assert by_text["Скачать выписку"].writes == []
 
 
+def test_a_label_span_inside_the_button_does_not_look_foreign():
+    """A <span> wrapper inside the button is part of it, not a second control."""
+    button = "<button class='load-more'><span>%s</span></button>" % LOAD_MORE
+    page = FakePage(
+        _history([_day(2), _day(1)], button),
+        on_click=lambda page, element: _append_days(
+            page, [("2025-12-31", "Старая операция", "-1,00")]
+        ),
+    )
+
+    result = collect(page, _profile(_scroll(stop_before_date="2026-01-01")))
+
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
+
+
 def test_without_the_button_the_list_ends_normally():
     page = FakePage(_history([_day(1), _day(2)]))
 
@@ -329,6 +346,76 @@ def test_a_same_label_button_outside_the_scope_is_never_clicked():
     ]
 
 
+def test_a_same_label_anchor_outside_the_scope_is_never_clicked():
+    """A link with the same label outside the list forces complete=False."""
+    offers = "<div class='offers'><a href='#'>Показать ещё</a></div>"
+    page = FakePage(_history([_day(1)], outside_html=offers))
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a link outside the list is never clicked"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: 'Показать ещё' found outside the list or not as a button (1), "
+        "not clicked — history may be incomplete"
+    ]
+
+
+def test_a_div_with_the_label_inside_the_scope_forces_incomplete():
+    """A plain div is not a button, but it may be hiding the list's next page."""
+    page = FakePage(
+        _history([_day(1)], "<div class='load-more-lookalike'>Показать ещё</div>")
+    )
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a div is never clicked"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["stop"] == "empty"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: 'Показать ещё' found outside the list or not as a button (1), "
+        "not clicked — history may be incomplete"
+    ]
+
+
+def test_a_div_role_button_with_the_label_counts_once():
+    """One element is one control: [role=button] is not also a text lookalike."""
+    page = FakePage(
+        _history([_day(1)], "<div role='button'>Показать ещё</div>")
+    )
+
+    result = collect(page, _profile(_scroll()))
+
+    assert page.writes == [], "a div is never clicked"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: 'Показать ещё' found outside the list or not as a button (1), "
+        "not clicked — history may be incomplete"
+    ]
+
+
+def test_a_row_less_wrapper_matching_the_scope_is_filtered_out():
+    """Only containers that hold rows count: an empty match must not stop the click."""
+    page = FakePage(
+        _history([_day(2), _day(1)], _load_more_button(), outside_html="<div class='operations'></div>"),
+        on_click=lambda page, element: _append_days(
+            page, [("2025-12-31", "Старая операция", "-1,00")]
+        ),
+    )
+
+    result = collect(page, _profile(_scroll(stop_before_date="2026-01-01")))
+
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["rows"] == 3
+    assert result["scroll"]["stop"] == "date"
+    assert result["scroll"]["complete"] is True
+    assert page.writes == [("click", None)]
+
+
 def test_a_scope_matching_no_container_never_clicks():
     page = FakePage(_history([_day(1)], _load_more_button()))
 
@@ -369,7 +456,20 @@ def test_load_more_text_must_be_a_non_empty_string(tmp_path, value):
         _load(tmp_path, "bad_text", "      load_more_text: %s\n" % value)
 
 
-@pytest.mark.parametrize("label", ["Скачать выписку", "Оплатить", "Перевести"])
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Скачать выписку",
+        "Оплатить",
+        "Перевести",
+        "Загрузить ещё",
+        "Загрузить еще",
+        "Ещё",
+        "Еще",
+        "Show more",
+        "Load more",
+    ],
+)
 def test_load_more_text_must_be_an_allowed_label(tmp_path, label):
     with pytest.raises(ProfileError, match="load-more labels"):
         _load(
@@ -389,7 +489,7 @@ def test_load_more_scope_requires_a_text(tmp_path):
         _load(tmp_path, "scope_only", '      load_more_scope: "%s"\n' % SCOPE)
 
 
-def test_the_allowlisted_label_is_matched_case_insensitively(tmp_path):
+def test_the_allowlisted_label_is_stored_in_canonical_casing(tmp_path):
     profile = _load(
         tmp_path,
         "folded",
@@ -397,8 +497,43 @@ def test_the_allowlisted_label_is_matched_case_insensitively(tmp_path):
     )
 
     assert (
-        profile["transactions"][0]["scroll"]["load_more_text"] == "показать ЕЩЁ"
-    ), "the collapsed canonical string is kept for matching"
+        profile["transactions"][0]["scroll"]["load_more_text"] == "Показать ещё"
+    ), "the allowlist's own spelling is stored"
+
+
+def test_a_case_insensitive_profile_label_clicks_the_canonical_button(tmp_path):
+    page = FakePage(
+        _history([_day(2), _day(1)], _load_more_button()),
+        on_click=lambda page, element: _append_days(
+            page, [("2025-12-31", "Старая операция", "-1,00")]
+        ),
+    )
+
+    result = collect(
+        page,
+        _profile(
+            _scroll(load_more_text="показать ЕЩЁ", stop_before_date="2026-01-01")
+        ),
+    )
+
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["rows"] == 3
+    assert result["scroll"]["stop"] == "date"
+    assert result["scroll"]["complete"] is True
+
+
+def test_a_canonical_profile_label_clicks_a_differently_cased_button():
+    page = FakePage(
+        _history([_day(2), _day(1)], "<button class='load-more'>ПОКАЗАТЬ ЕЩЁ</button>"),
+        on_click=lambda page, element: _append_days(
+            page, [("2025-12-31", "Старая операция", "-1,00")]
+        ),
+    )
+
+    result = collect(page, _profile(_scroll(stop_before_date="2026-01-01")))
+
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["stop"] == "date"
 
 
 @pytest.mark.parametrize("value", ["0", "-3", "true", "'5'"])

@@ -2,7 +2,21 @@
 
 import io
 
-from bank_collector.cli import EXIT_INCOMPLETE, EXIT_NOTHING, EXIT_OK, _exit_code
+from bank_collector.cli import (
+    EXIT_INCOMPLETE,
+    EXIT_NOTHING,
+    EXIT_OK,
+    _exit_code,
+    build_parser,
+)
+
+
+def test_help_does_not_claim_that_nothing_is_ever_filled():
+    text = build_parser().format_help()
+
+    assert "no fills" not in text
+    assert "--enter-code" in text
+    assert "fill is --enter-code" in text
 
 
 def _report(transactions=1, balances=1, scroll=None):

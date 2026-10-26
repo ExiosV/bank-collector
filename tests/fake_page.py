@@ -8,6 +8,7 @@ so this module implements the small part of the DOM that
 * ``wait_for_selector(selector, timeout=...)``
 * ``query_all(selector)``
 * ``content()`` / ``inner_text(selector)``
+* ``scroll_by(dy)`` -- read-only: it only moves the viewport
 
 It also ships a small CSS engine, because real bank pages are anchored on
 ``data-test-id`` attributes and nest their rows deeply. The subset supported
@@ -416,12 +417,17 @@ def _matches_steps(element, steps):
 class FakePage(object):
     """A stand-in for a Playwright page, backed by a static HTML string."""
 
-    def __init__(self, html, url="https://example.invalid/cabinet"):
+    def __init__(self, html, url="https://example.invalid/cabinet", pages=None, on_scroll=None):
         self.html = html
         self.root = parse_html(html)
         self.url = url
         self.visited = []
         self.waited_for = []
+        #: Every scroll the driver asked for, in order: ("scroll", dy).
+        #: Scrolling is not a write, so it has its own log (see ``writes``).
+        self.scrolls = []
+        self._pages = list(pages or [])
+        self._on_scroll = on_scroll
 
     # -- playwright-like API ---------------------------------------------
     def goto(self, url, **kwargs):
@@ -437,6 +443,22 @@ class FakePage(object):
 
     def query_all(self, selector):
         return self.root.query_all(selector)
+
+    def scroll_by(self, dy):
+        """Pretend to scroll the viewport by *dy* pixels.
+
+        Scrolling is read-only: nothing is written into the DOM, only the
+        ``scrolls`` log grows.  A page built with ``pages`` serves the next
+        HTML document on every scroll (that is how an SPA appends rows), a
+        page built with ``on_scroll`` lets the test grow the DOM itself.
+        """
+        self.scrolls.append(("scroll", dy))
+        if self._pages:
+            self.html = self._pages.pop(0)
+            self.root = parse_html(self.html)
+        if self._on_scroll is not None:
+            self._on_scroll(self)
+        return None
 
     @property
     def writes(self):

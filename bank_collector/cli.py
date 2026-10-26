@@ -22,6 +22,7 @@ owner removes it with ``--clear-code-failure``.
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -45,6 +46,7 @@ EXIT_OK = 0
 EXIT_NO_BROWSER = 2
 EXIT_BAD_PROFILE = 3
 EXIT_NOTHING = 4
+EXIT_INCOMPLETE = 5
 
 #: The line that is printed on stdout when the code screen was handled.
 UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
@@ -120,6 +122,14 @@ def build_parser():
         help="also dump a sanitised HTML/text snapshot of the page (for writing selectors)",
     )
     parser.add_argument(
+        "--no-scroll",
+        action="store_true",
+        help=(
+            "do not scroll the rendered list, even when the profile asks for it "
+            "(the first rendered screen only; nothing else changes)"
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=("json", "csv", "both"),
         default="both",
@@ -163,8 +173,50 @@ def _print_profiles(stream=sys.stdout):
         stream.write("%-16s %-12s %s\n" % (profile["name"], profile.get("status") or "?", profile.get("bank")))
 
 
+def _incomplete(report):
+    """True when the report scrolled but did not reach the whole history."""
+    scroll = report.get("scroll")
+    return bool(scroll) and not scroll.get("complete")
+
+
+def _would_lose_history(report, path):
+    """True when writing *report* to *path* would replace a fuller snapshot.
+
+    A run that is not proven complete must not overwrite yesterday's longer
+    history: the daily job would trade a year for a screen. That covers a
+    scroll that stopped short, a ``--no-scroll`` run over a file that was
+    scrolled, and a run that extracted nothing. A complete run always wins,
+    and a bank without scrolling (its count of rows changes every day) is
+    never held back.
+    """
+    if (report.get("scroll") or {}).get("complete"):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(previous, dict) or not isinstance(previous.get("transactions"), list):
+        return False
+    if len(previous["transactions"]) <= len(report.get("transactions") or []):
+        return False
+    nothing = not report.get("balances") and not report.get("transactions")
+    return _incomplete(report) or bool(previous.get("scroll")) or nothing
+
+
 def _write_outputs(report, out_dir, formats, bank):
+    """Write the report; return ``(paths, kept)``.
+
+    *kept* is the path of a fuller snapshot that was left in place: the new
+    report then goes to ``<bank>.partial.json`` and nothing else is written.
+    """
     os.makedirs(out_dir, exist_ok=True)
+    if formats in ("json", "both"):
+        path = os.path.join(out_dir, "%s.json" % bank)
+        if _would_lose_history(report, path):
+            partial = os.path.join(out_dir, "%s.partial.json" % bank)
+            report_mod.write_json(report, partial)
+            return [partial], path
     written = []
     if formats in ("json", "both"):
         path = os.path.join(out_dir, "%s.json" % bank)
@@ -177,7 +229,7 @@ def _write_outputs(report, out_dir, formats, bank):
         path = os.path.join(out_dir, "%s-transactions.csv" % bank)
         report_mod.write_csv(report["transactions"], path)
         written.append(path)
-    return written
+    return written, None
 
 
 def _snapshot(page, out_dir, bank):
@@ -206,6 +258,20 @@ def _same_url(left, right):
     if not left or not right:
         return left == right
     return left.rstrip("/") == right.rstrip("/")
+
+
+def _without_scroll(profile):
+    """Return a copy of *profile* whose records have no ``scroll`` block.
+
+    It powers ``--no-scroll``: the run reads the first rendered screen only,
+    exactly as it did before the profiles learned to scroll.
+    """
+    stripped = copy.deepcopy(profile)
+    for section in ("balances", "transactions"):
+        for record in stripped.get(section) or []:
+            if isinstance(record, dict):
+                record.pop("scroll", None)
+    return stripped
 
 
 class _AlreadyOpenPage(object):
@@ -330,6 +396,10 @@ def main(argv=None):
         sys.stderr.write("profile error: %s\n" % exc)
         return EXIT_BAD_PROFILE
 
+    if args.no_scroll:
+        # The defensive switch: read the first rendered screen only.
+        profile = _without_scroll(profile)
+
     try:
         playwright, browser = connect(args.cdp_url, timeout_ms=args.timeout)
     except BrowserUnavailable as exc:
@@ -373,7 +443,7 @@ def main(argv=None):
             for path in paths:
                 sys.stdout.write("snapshot: %s\n" % path)
 
-        written = _write_outputs(report, args.out, args.format, profile.get("bank") or args.bank)
+        written, kept = _write_outputs(report, args.out, args.format, profile.get("bank") or args.bank)
         for path in written:
             sys.stdout.write("written: %s\n" % path)
 
@@ -406,6 +476,21 @@ def main(argv=None):
                 "(see docs/ADD_A_BANK.md) and try --snapshot\n"
             )
             return EXIT_NOTHING
+        if kept:
+            sys.stderr.write(
+                "the snapshot already in %s holds a longer history than this run "
+                "(%d transactions): it was kept, the new report is in %s\n"
+                % (kept, len(report["transactions"]), written[0])
+            )
+            return EXIT_INCOMPLETE
+        if _incomplete(report):
+            scroll = report["scroll"]
+            sys.stderr.write(
+                "history incomplete: it reaches back only to %s (scroll stop: %s); "
+                "the report was written, but the run is not a success\n"
+                % (scroll.get("oldest_date") or "no dated row", scroll.get("stop"))
+            )
+            return EXIT_INCOMPLETE
         return EXIT_OK
     finally:
         # Close the tab we opened ourselves, and never the person's browser.

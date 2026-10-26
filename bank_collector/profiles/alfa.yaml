@@ -2,12 +2,14 @@
 # cabinet on 2026-10-24 for a desktop Chrome session.
 #
 # Two pages: the dashboard holds the product balances, /history/ holds the
-# operations. Only the already rendered page is read: the collector does not
-# scroll, does not press "Скачать выписку" and does not paginate, so
-# transactions contain what the first screen of /history/ shows.
+# operations. The already rendered page is read — and the history list is
+# scrolled so that the operations the cabinet appends while it is scrolled are
+# read as well (down to stop_before_date). Scrolling only moves the viewport:
+# nothing is clicked, "Скачать выписку" is never pressed, no request of our
+# own is sent and there is no pagination button to press.
 bank: alfa
 status: verified
-notes: "Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the first page of /history/ only (no scrolling, no pagination, no statement download). The 'common balance' widget is not the sum of the product cards, so the profile reads the cards and ignores it."
+notes: "Checked on 2026-10-24 against a desktop Chrome session: the dashboard and the operations list of /history/, which is scrolled (read-only) down to the date in scroll.stop_before_date. Nothing is clicked, no pagination button is pressed, no statement is downloaded and no request of our own is sent. The 'common balance' widget is not the sum of the product cards, so the profile reads the cards and ignores it."
 url: "https://web.alfabank.ru/dashboard/"
 wait_for: "[data-test-id=common-balance-button]"
 
@@ -36,6 +38,17 @@ transactions:
           selector: "[data-test-id=transaction-category-name]"
         amount:
           selector: "[data-test-id=transaction-status]"
+    # The history list shows 20 operations per screen and appends the next
+    # ones while it is scrolled. Scrolling is read-only: the viewport moves,
+    # nothing is clicked and no request of our own is sent. A slow cabinet
+    # gets about 7 s (6 empty rounds x 1.2 s) to append rows before the list
+    # counts as finished; stopping short of stop_before_date is a warning.
+    scroll:
+      max_rounds: 200
+      step_px: 1200
+      settle_ms: 1200
+      stop_after_empty_rounds: 6
+      stop_before_date: "2026-01-01"
 
 # The cabinet's static "secret code" screen (NOT an SMS code): after a long
 # absence Alfa asks for the permanent cabinet code it already knows. The

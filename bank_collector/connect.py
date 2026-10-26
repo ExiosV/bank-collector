@@ -8,6 +8,11 @@ Rules of this module:
   started stays open and yours;
 * the only network traffic is to the local CDP endpoint (or to a relay URL
   you pass explicitly with ``--cdp-url``).
+
+The page may also be *scrolled* (see ``scroll_by``): scrolling moves the
+viewport and changes nothing — no DOM mutation, no click, no form submit and
+no request of our own. It is used to read the rows a cabinet appends while
+the list is scrolled.
 """
 
 __all__ = [
@@ -32,6 +37,39 @@ _HINT = (
     "Log in to your bank by hand in that window, then re-run the command.\n"
     "bank-collector never logs in and never asks for a password or a code."
 )
+
+
+def _viewport(page):
+    """The ``(width, height)`` of the viewport, or ``None`` when unknown.
+
+    A page of a browser attached over CDP emulates no viewport, so
+    Playwright's ``viewport_size`` is ``None`` there; the window is then
+    asked for its inner size — a read of two numbers, nothing is changed.
+    """
+    size = getattr(page, "viewport_size", None)
+    if size and size.get("width") and size.get("height"):
+        return size["width"], size["height"]
+    try:
+        width, height = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+    except Exception:
+        return None
+    if width and height:
+        return width, height
+    return None
+
+
+def _wheel(page, dy):
+    """Turn the mouse wheel over the middle of the viewport.
+
+    The wheel scrolls whatever lies under the pointer, and Playwright keeps
+    the pointer at (0, 0) until it is moved — over the header, not over a
+    list that may scroll inside its own container. Moving the pointer is a
+    hover, not a click: it stays read-only.
+    """
+    size = _viewport(page)
+    if size:
+        page.mouse.move(size[0] / 2, size[1] / 2)
+    return page.mouse.wheel(0, int(dy))
 
 
 class BrowserUnavailable(Exception):
@@ -133,6 +171,18 @@ class FrameAdapter(object):
         except Exception:  # pragma: no cover - defensive
             return ""
 
+    def scroll_by(self, dy):
+        """Scroll the page the frame lives in by *dy* pixels.
+
+        Scrolling is read-only: it moves the viewport, it clicks nothing and
+        it sends no request of our own.  A frame without a page (it cannot
+        scroll on its own) is silently ignored.
+        """
+        page = getattr(self._frame, "page", None)
+        if page is None:
+            return None
+        return _wheel(page, dy)
+
 
 class PageAdapter(object):
     """Adapt a Playwright page to the protocol of ``collect``.
@@ -159,6 +209,16 @@ class PageAdapter(object):
 
     def query_all(self, selector):
         return [ElementAdapter(handle) for handle in self._page.query_selector_all(selector)]
+
+    def scroll_by(self, dy):
+        """Scroll the viewport by *dy* pixels.
+
+        Scrolling is read-only: it moves the viewport, it clicks nothing, it
+        mutates nothing and it sends no request of our own.  It is the way
+        the driver reads the rows a cabinet appends while the list is
+        scrolled.
+        """
+        return _wheel(self._page, dy)
 
     @property
     def frames(self):

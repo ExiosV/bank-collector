@@ -13,6 +13,9 @@ objects:
     ``query_all(selector)``        -- list of elements matching a CSS selector
     ``content()``                  -- optional, the rendered HTML (snapshots)
     ``url``                        -- the URL that is currently open
+    ``scroll_by(dy)``              -- optional, scroll the viewport by *dy*
+                                      pixels (read-only: no click, no DOM
+                                      mutation, no request of our own)
 
 An *element* must provide
     ``query_all(selector)``        -- descendants matching a CSS selector
@@ -31,9 +34,16 @@ A record may also carry ``items``: a group of rows (the operations of one
 day) that holds the fields of the group (the date) and an inner set of rows
 (the operations themselves). The fields of the group and of the item are
 merged into one output row.
+
+Finally a record may carry ``scroll``: the driver then scrolls the rendered
+list (read-only) and reads the rows that the cabinet appends while the list
+is scrolled, until the list stops growing, the date limit of the profile is
+reached or the round limit is hit.
 """
 
 import re
+import time
+from collections import Counter
 
 __all__ = [
     "collect",
@@ -262,14 +272,24 @@ def extract_record(row, record_def, where_prefix, warnings):
 
         element = matches[0]
         attr = spec.get("attr")
-        if attr:
-            text = element.get_attribute(attr)
-            if text is None:
-                warnings.append("%s: attribute %r missing" % (where, attr))
-                fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
-                continue
-        else:
-            text = element.text_content()
+        # A handle obtained from ``query_all`` dies when the SPA re-renders the
+        # list (the cabinet navigates after the code screen, and again while a
+        # scrolled list appends rows). Reading it then raises
+        # "Execution context was destroyed" — one broken element must never
+        # abort the whole run, so it becomes a warning and an empty field.
+        try:
+            if attr:
+                text = element.get_attribute(attr)
+                if text is None:
+                    warnings.append("%s: attribute %r missing" % (where, attr))
+                    fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+                    continue
+            else:
+                text = element.text_content()
+        except Exception as exc:
+            warnings.append("%s: reading %r failed (%s)" % (where, spec.get("selector"), exc))
+            fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+            continue
 
         matched = _apply_regex(text, spec, where, warnings)
         if matched is None:
@@ -320,15 +340,13 @@ def visit_record(page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TI
     return navigated
 
 
-def extract_section(page, record_def, section_name, warnings, visited=None, timeout_ms=DEFAULT_TIMEOUT_MS):
-    """Extract one section (``balances`` or ``transactions``) from *page*.
+def _extract_rows(page, record_def, section_name, warnings):
+    """Read the rows of a record as they are rendered right now.
 
     A record may hold ``items``: rows *inside* every row of the group. The
     fields of the group and of the item are merged into one output row — the
     item wins when both define the same field.
     """
-    visit_record(page, record_def, warnings, visited=visited, timeout_ms=timeout_ms)
-
     rows = page.query_all(record_def["row"]) if record_def.get("row") else [page]
     items_def = record_def.get("items")
     results = []
@@ -366,16 +384,280 @@ def extract_section(page, record_def, section_name, warnings, visited=None, time
     return results
 
 
+def _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=DEFAULT_TIMEOUT_MS):
+    """Read the rows, retrying once when the DOM was torn by a navigation.
+
+    A single ``query_all`` + ``text_content`` pass can fail while the cabinet
+    replaces the rendered list (after the code screen, or while a scrolled
+    list appends rows). The pass is then repeated once after a short pause and
+    a fresh wait for the record's ``wait_for`` selector. Two failures do not
+    raise: they become one warning and an empty result, because a lost section
+    is better reported than a lost run.
+    """
+    attempt_warnings = []
+    try:
+        rows = _extract_rows(page, record_def, section_name, attempt_warnings)
+        warnings.extend(attempt_warnings)
+        return rows
+    except Exception:
+        pass
+
+    if timeout_ms:
+        time.sleep(0.6)
+    try:
+        wait_for = record_def.get("wait_for")
+        if wait_for:
+            page.wait_for_selector(wait_for, timeout=timeout_ms)
+    except Exception:  # pragma: no cover - best effort only
+        pass
+
+    retry_warnings = []
+    try:
+        rows = _extract_rows(page, record_def, section_name, retry_warnings)
+    except Exception as exc:
+        warnings.append("%s: extraction failed after 2 attempts (%s)" % (section_name, exc))
+        return []
+    warnings.extend(retry_warnings)
+    return rows
+
+
+#: The fields that identify one operation: two rows with the same values are
+#: the same operation, even when the page repeats it after a scroll.
+_ROW_KEY_FIELDS = ("date", "title", "category", "amount")
+
+#: How many warnings of the scrolled rounds are reported at most (they would
+#: otherwise repeat themselves once per round).
+_SCROLL_WARNING_LIMIT = 5
+
+#: The date of a row (``YYYY-MM-DD`` prefix of the extracted value).
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _field_text(row, name):
+    """The text of one field of a row: the normalised value, else the raw one."""
+    field = row.get(name)
+    if not isinstance(field, dict):
+        return ""
+    for key in ("value", "raw"):
+        text = field.get(key)
+        if text:
+            return str(text)
+    return ""
+
+
+def _row_key(row):
+    """The key that identifies a row: its date, title, category and amount."""
+    return tuple(_field_text(row, name) for name in _ROW_KEY_FIELDS)
+
+
+def _row_date(row):
+    """The ``YYYY-MM-DD`` date of a row, or ``None`` when it has none."""
+    text = _field_text(row, "date")[:10]
+    if len(text) == 10 and _DATE_PREFIX_RE.match(text):
+        return text
+    return None
+
+
+def _oldest_date(rows):
+    """The oldest ``YYYY-MM-DD`` date among *rows*, or ``None``."""
+    dates = [date for date in (_row_date(row) for row in rows) if date]
+    return min(dates) if dates else None
+
+
+def _reached_date(rows, stop_before):
+    """True when a row is dated strictly before *stop_before* (a ``YYYY-MM-DD``).
+
+    Strictly before, not on: the operations of one day may arrive in two
+    batches, so the day of *stop_before* itself is complete only once an
+    older row has been rendered.
+    """
+    if not stop_before:
+        return False
+    oldest = _oldest_date(rows)
+    return oldest is not None and oldest < stop_before
+
+
+def _append_scroll_warnings(warnings, scrolled_warnings):
+    """Add a few warnings of the scrolled rounds to the report.
+
+    The same broken selector would otherwise be reported once per round, so
+    only the first few different messages are kept.
+    """
+    seen = set()
+    for message in scrolled_warnings:
+        if message in seen:
+            continue
+        seen.add(message)
+        warnings.append("scrolled row: %s" % message)
+        if len(seen) >= _SCROLL_WARNING_LIMIT:
+            break
+
+
+def _scroll_section(
+    page, record_def, section_name, warnings, rows, scroll_def, timeout_ms=DEFAULT_TIMEOUT_MS
+):
+    """Scroll the rendered list and append the rows it newly shows.
+
+    Scrolling is read-only: the viewport moves, nothing is clicked and no
+    request of our own is sent. Returns ``(rows, info)``, where *info* says
+    how many rounds were made, how many rows were collected in total and why
+    the scrolling stopped.
+    """
+    scroll_by = getattr(page, "scroll_by", None)
+    if scroll_by is None:
+        # The page cannot scroll — nothing is done, and it is said so.
+        info = {"rounds": 0, "rows": len(rows), "stop": "no-scroll", "oldest_date": _oldest_date(rows)}
+        _judge_completeness(warnings, section_name, info, scroll_def.get("stop_before_date"))
+        return rows, info
+
+    max_rounds = scroll_def["max_rounds"]
+    step_px = scroll_def["step_px"]
+    settle_ms = scroll_def["settle_ms"]
+    stop_after_empty = scroll_def["stop_after_empty_rounds"]
+    stop_before = scroll_def["stop_before_date"]
+
+    # How many times each operation has been kept so far. A key may repeat:
+    # two equal coffees on one day are two operations, so a round adds a row
+    # only when it shows that key more often than the rows already kept.
+    seen = Counter(_row_key(row) for row in rows)
+
+    rounds = 0
+    empty_rounds = 0
+    stop = "empty"
+    scrolled_warnings = []
+
+    while rounds < max_rounds:
+        try:
+            scroll_by(step_px)
+        except Exception as exc:
+            warnings.append("%s: scrolling stopped (%s)" % (section_name, exc))
+            stop = "error"
+            break
+        rounds += 1
+        if settle_ms > 0:
+            time.sleep(settle_ms / 1000.0)
+
+        added = 0
+        in_round = Counter()
+        for row in _extract_rows_stable(
+            page, record_def, section_name, scrolled_warnings, timeout_ms=timeout_ms
+        ):
+            key = _row_key(row)
+            if any(key):
+                in_round[key] += 1
+                if in_round[key] <= seen[key]:
+                    continue
+                seen[key] += 1
+            # A row without a date, a title, a category and an amount cannot
+            # be recognised as a duplicate — it is always kept.
+            rows.append(row)
+            added += 1
+
+        if _reached_date(rows, stop_before):
+            stop = "date"
+            break
+
+        if added:
+            empty_rounds = 0
+            continue
+        empty_rounds += 1
+        if empty_rounds >= stop_after_empty:
+            stop = "empty"
+            break
+    else:
+        stop = "limit"
+        warnings.append(
+            "%s: scroll limit reached after %d rounds (%d rows, history may be incomplete)"
+            % (section_name, rounds, len(rows))
+        )
+
+    _append_scroll_warnings(warnings, scrolled_warnings)
+    info = {"rounds": rounds, "rows": len(rows), "stop": stop, "oldest_date": _oldest_date(rows)}
+    _judge_completeness(warnings, section_name, info, stop_before)
+    return rows, info
+
+
+def _judge_completeness(warnings, section_name, info, stop_before):
+    """Set ``info["complete"]`` and say so when the history is short.
+
+    The history is complete when an older row than *stop_before* was seen
+    (``date``) or when the list stopped growing at a row of that day or
+    older. A list that stopped growing too early (``empty``), a broken
+    scroll (``error``) or a page that cannot scroll may simply not have
+    rendered the older rows yet; without this flag such a run would look
+    like a complete history. Without *stop_before* only a list that stopped
+    growing counts as complete. The round limit has a warning of its own.
+    """
+    stop = info["stop"]
+    oldest = info.get("oldest_date")
+    if stop == "date":
+        info["complete"] = True
+        return
+    if stop == "limit":
+        info["complete"] = False
+        return
+    if not stop_before:
+        info["complete"] = stop == "empty"
+        return
+    info["complete"] = oldest is not None and oldest <= stop_before
+    if not info["complete"]:
+        warnings.append(
+            "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
+            % (section_name, oldest or "no dated row", stop_before, stop)
+        )
+
+
+def extract_section(
+    page,
+    record_def,
+    section_name,
+    warnings,
+    visited=None,
+    timeout_ms=DEFAULT_TIMEOUT_MS,
+    scroll_info=None,
+):
+    """Extract one section (``balances`` or ``transactions``) from *page*.
+
+    A record may hold ``items``: rows *inside* every row of the group. The
+    fields of the group and of the item are merged into one output row — the
+    item wins when both define the same field.
+
+    A record may hold ``scroll``: the driver then scrolls the rendered list
+    (read-only) and keeps the rows that appear while the list is scrolled.
+    *scroll_info* — when a dictionary is given — receives a small report
+    about that run.
+    """
+    visit_record(page, record_def, warnings, visited=visited, timeout_ms=timeout_ms)
+
+    results = _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=timeout_ms)
+
+    scroll_def = record_def.get("scroll")
+    if scroll_def:
+        results, info = _scroll_section(
+            page, record_def, section_name, warnings, results, scroll_def, timeout_ms=timeout_ms
+        )
+        if scroll_info is not None:
+            scroll_info.update(info)
+
+    return results
+
+
 def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     """Collect balances and transactions for *profile* from an open *page*.
 
     Returns a dict with the keys ``bank``, ``status``, ``source_url``,
     ``source_urls``, ``fetched_at``, ``balances``, ``transactions`` and
     ``warnings``. ``source_urls`` lists every page that was opened, in order.
+    When a record asked for scrolling, the dict also holds a ``scroll`` key
+    (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
+    "no-scroll", "oldest_date": "YYYY-MM-DD"|None, "complete": bool}``)
+    that tells how the scroll ended, how far back it reached and whether
+    that is the whole history the profile asked for.
     """
     warnings = []
     url = profile["url"]
     visited = []
+    scroll_sections = {}
 
     try:
         page.goto(url)
@@ -392,17 +674,37 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
 
     balances = []
     for record_def in profile.get("balances") or []:
+        info = {}
         balances.extend(
-            extract_section(page, record_def, "balances", warnings, visited=visited, timeout_ms=timeout_ms)
+            extract_section(
+                page,
+                record_def,
+                "balances",
+                warnings,
+                visited=visited,
+                timeout_ms=timeout_ms,
+                scroll_info=info,
+            )
         )
+        if info:
+            scroll_sections["balances"] = info
 
     transactions = []
     for record_def in profile.get("transactions") or []:
+        info = {}
         transactions.extend(
             extract_section(
-                page, record_def, "transactions", warnings, visited=visited, timeout_ms=timeout_ms
+                page,
+                record_def,
+                "transactions",
+                warnings,
+                visited=visited,
+                timeout_ms=timeout_ms,
+                scroll_info=info,
             )
         )
+        if info:
+            scroll_sections["transactions"] = info
 
     if not balances:
         warnings.append("no balances extracted")
@@ -415,7 +717,7 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
         now = datetime.now(timezone.utc)
     fetched_at = now.isoformat().replace("+00:00", "Z")
 
-    return {
+    result = {
         "bank": profile.get("bank"),
         "status": profile.get("status"),
         "source_url": visited[0] if visited else url,
@@ -425,3 +727,8 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
         "transactions": transactions,
         "warnings": warnings,
     }
+
+    scroll_info = scroll_sections.get("transactions") or scroll_sections.get("balances")
+    if scroll_info:
+        result["scroll"] = scroll_info
+    return result

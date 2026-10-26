@@ -7,6 +7,9 @@ Exit codes
 3   the profile is missing or invalid, or the code file of ``--enter-code``
     is missing or readable by other users
 4   the page was read but nothing could be extracted (warning is printed)
+5   the history is incomplete: the scroll did not reach ``stop_before_date``
+    (or hit ``max_rounds``), or a fuller snapshot on disk was kept and the
+    new report went to ``<bank>.partial.json`` — not a success either way
 
 The tool never asks for a password, an SMS code or a cookie, and it never
 logs in. It only reads the page that is already open in *your* browser.
@@ -185,7 +188,7 @@ def _would_lose_history(report, path):
     A run that is not proven complete must not overwrite yesterday's longer
     history: the daily job would trade a year for a screen. That covers a
     scroll that stopped short, a ``--no-scroll`` run over a file that was
-    scrolled, and a run that extracted nothing. A complete run always wins,
+    scrolled, and a run without transactions. A complete run always wins,
     and a bank without scrolling (its count of rows changes every day) is
     never held back.
     """
@@ -200,7 +203,9 @@ def _would_lose_history(report, path):
         return False
     if len(previous["transactions"]) <= len(report.get("transactions") or []):
         return False
-    nothing = not report.get("balances") and not report.get("transactions")
+    # A run without transactions never replaces a history that has some,
+    # even when it read the balances.
+    nothing = not report.get("transactions")
     return _incomplete(report) or bool(previous.get("scroll")) or nothing
 
 
@@ -372,6 +377,39 @@ def _clear_code_failure(args):
     return EXIT_OK
 
 
+def _exit_code(report, written, kept, stream=None):
+    """The exit code of a finished run, with the line that explains it.
+
+    The daily job trusts only this code: anything but 0 is retried and then
+    reported, and only a 0 is uploaded. The order matters — an empty run is
+    ``EXIT_NOTHING`` even when a fuller file was kept.
+    """
+    stream = stream or sys.stderr
+    if kept:
+        stream.write(
+            "the snapshot already in %s holds a longer history than this run "
+            "(%d transactions): it was kept, the new report is in %s\n"
+            % (kept, len(report["transactions"]), written[0])
+        )
+    if not report["balances"] and not report["transactions"]:
+        stream.write(
+            "nothing was extracted — check the selectors in the profile "
+            "(see docs/ADD_A_BANK.md) and try --snapshot\n"
+        )
+        return EXIT_NOTHING
+    if kept:
+        return EXIT_INCOMPLETE
+    if _incomplete(report):
+        scroll = report["scroll"]
+        stream.write(
+            "history incomplete: it reaches back only to %s (scroll stop: %s); "
+            "the report was written, but the run is not a success\n"
+            % (scroll.get("oldest_date") or "no dated row", scroll.get("stop"))
+        )
+        return EXIT_INCOMPLETE
+    return EXIT_OK
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -470,28 +508,7 @@ def main(argv=None):
         for warning in report["warnings"]:
             sys.stderr.write("warning: %s\n" % warning)
 
-        if not report["balances"] and not report["transactions"]:
-            sys.stderr.write(
-                "nothing was extracted — check the selectors in the profile "
-                "(see docs/ADD_A_BANK.md) and try --snapshot\n"
-            )
-            return EXIT_NOTHING
-        if kept:
-            sys.stderr.write(
-                "the snapshot already in %s holds a longer history than this run "
-                "(%d transactions): it was kept, the new report is in %s\n"
-                % (kept, len(report["transactions"]), written[0])
-            )
-            return EXIT_INCOMPLETE
-        if _incomplete(report):
-            scroll = report["scroll"]
-            sys.stderr.write(
-                "history incomplete: it reaches back only to %s (scroll stop: %s); "
-                "the report was written, but the run is not a success\n"
-                % (scroll.get("oldest_date") or "no dated row", scroll.get("stop"))
-            )
-            return EXIT_INCOMPLETE
-        return EXIT_OK
+        return _exit_code(report, written, kept)
     finally:
         # Close the tab we opened ourselves, and never the person's browser.
         if own_page is not None:

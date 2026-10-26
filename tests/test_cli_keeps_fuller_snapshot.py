@@ -102,3 +102,14 @@ def test_an_unfinished_scroll_is_never_a_success():
     assert _incomplete(_report(20, "empty")) is True
     assert _incomplete(_report(20, "date")) is False
     assert _incomplete(_report(20)) is False, "no scroll, nothing to judge"
+
+
+def test_balances_without_transactions_do_not_replace_the_history(tmp_path):
+    previous = _write_previous(tmp_path, 20, scrolled=False)
+    report = _report(0)
+    report["balances"] = [{"amount": 1}]
+
+    written, kept = _write_outputs(report, str(tmp_path), "json", "alfa")
+
+    assert kept == str(previous)
+    assert len(json.loads(previous.read_text())["transactions"]) == 20

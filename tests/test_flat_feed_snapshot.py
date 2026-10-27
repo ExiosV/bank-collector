@@ -135,17 +135,19 @@ def test_the_adapter_makes_exactly_one_evaluate_call():
 # ---------------------------------------------------------------------------
 
 
-def test_a_feed_rendered_out_of_order_is_dated_by_the_header_above_on_screen():
-    """The DOM renders a different order than the screen shows (newest on top)."""
+def test_rows_are_dated_in_dom_order_whatever_the_geometry_says():
+    """T-Bank's header <li> all report the list's top (the header itself is absolutely
+    positioned): ordering by geometry dated whole screens by the wrong day (live run,
+    2026-10-27). DOM order is what dates an operation."""
     page = FakePage(
         _feed(
+            _header("27 октября"),
             _operation("Кофе (тест)", "−250 ₽", "Кафе и рестораны"),
             _header("26 октября"),
-            _header("27 октября"),
             _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
         )
     )
-    tops = [150.0, 300.0, 100.0, 350.0]
+    tops = [563.0, 607.0, 563.0, 755.0]
     rows = page.query_all(ROW)
     assert len(rows) == 4
     for row, top in zip(rows, tops):
@@ -156,9 +158,6 @@ def test_a_feed_rendered_out_of_order_is_dated_by_the_header_above_on_screen():
         page, _flat_record(), "transactions", warnings, timeout_ms=1, now=FIXED_NOW
     )
 
-    # Walking the DOM would lose the coffee (it comes before every header)
-    # and date the tea by 27 October. On screen the 27th is the topmost
-    # header, so the coffee below it is the 27th and the tea is the 26th.
     assert [row["title"]["value"] for row in result] == ["Кофе (тест)", "Чай (тест)"]
     assert [row["date"]["value"] for row in result] == ["2026-10-27", "2026-10-26"]
     assert warnings == []

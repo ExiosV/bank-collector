@@ -107,11 +107,11 @@ def redact_url(text, url=None):
     return text
 
 #: One read-only pass over a flat feed (day headers and operations are sibling
-#: rows). It walks the DOM once and returns, per row, its position on screen,
+#: rows). It walks the DOM once and returns, per row, its DOM index,
 #: whether it is a header and the raw text of its fields: a header row carries
 #: ``spec.header_fields``, every other row carries ``spec.fields``. Nothing is
 #: clicked, focused, scrolled or written — only ``querySelector``,
-#: ``textContent``, ``getAttribute`` and ``getBoundingClientRect`` are used.
+#: ``textContent`` and ``getAttribute`` are used.
 #: ``regex``/``group``/``parse``/``optional`` are applied in Python afterwards.
 SNAPSHOT_ROWS_JS = """
 (spec) => {
@@ -139,7 +139,6 @@ SNAPSHOT_ROWS_JS = """
     } catch (err) {}
     return {
       index: index,
-      top: row.getBoundingClientRect().top,
       header: header,
       fields: read(row, header ? spec.header_fields : spec.fields),
     };
@@ -344,8 +343,7 @@ class PageAdapter(object):
 
         *spec* holds only selectors and attributes (``row``,
         ``header_selector``, ``header_fields``, ``fields``); the page walks
-        the DOM once and returns, per row, its ``index``, its ``top`` on
-        screen, whether it is a header and the raw text of the fields that
+        the DOM once and returns, per row, its ``index``, whether it is a header and the raw text of the fields that
         apply to it. One round trip instead of ``query_all`` +
         ``text_content`` per row over a remote CDP relay.
         """

@@ -18,9 +18,10 @@
 # That is a flat feed with day headers: the record uses `header` (not
 # `items`), so `row` matches both kinds of <li> and every operation inherits
 # the date of the preceding header. The whole feed is read in ONE page-side
-# pass (`snapshot_rows`), so an operation is dated by the header nearest
-# ABOVE IT ON SCREEN, not by the order the DOM happens to render (this feed is
-# a virtualised React list). The date is parsed by `parse: ru_date`
+# pass (`snapshot_rows`) and walked in DOM order: an operation takes the date
+# of the header before it in that snapshot. (Geometry is useless here: every
+# header <li> reports the list's top, the header itself being absolutely
+# positioned.) The date is parsed by `parse: ru_date`
 # ("27 октября", "Сегодня", "Вчера", an optional year; the day total after
 # the date is ignored).
 #

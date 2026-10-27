@@ -514,30 +514,26 @@ def _record_from_snapshot(fields, record_def, where_prefix, warnings, now=None):
 
 
 def _sort_key(position, item):
-    """Sort the rows of a snapshot by their place on screen, then by DOM order.
+    """The DOM position of a snapshot row (its ``index``, else its place in the list).
 
-    The top of a row is what tells where it really sits: a virtualised feed
-    may render its rows in an order that differs from what the reader sees.
-    A missing or non-numeric ``top`` falls back to the DOM position, so the
-    order of a page that cannot report geometry is unchanged.
+    Rows are walked in DOM order, not by their geometry: on T-Bank the day
+    header sits in an absolutely positioned child, so every header ``<li>``
+    reports the same ``top`` (the top of the list) — sorting by it dated whole
+    screens of operations by the wrong day (live run, 2026-10-27). What made the
+    old element-by-element pass misdate rows was its slowness while the list
+    re-rendered, which the single page-side pass removes.
     """
-    top = item.get("top")
-    try:
-        top = float(top)
-    except (TypeError, ValueError):
-        top = float(position)
     index = item.get("index")
     if not isinstance(index, int) or isinstance(index, bool):
         index = position
-    return (top, index)
+    return index
 
 
 def _records_from_snapshot(snapshot, record_def, section_name, warnings, now=None, counter=None):
     """Build the records of a flat feed from one page-side snapshot.
 
-    Every row is placed by ``(top, index)``, so a row is dated by the day
-    header that is *visually* nearest above it, not by the order the DOM
-    happens to render. A row before the first header in that order has no
+    Rows are walked in DOM order, so a row is dated by the day header that
+    precedes it in the same snapshot. A row before the first header has no
     date: it is skipped silently and counted in ``counter["headerless_rows"]``
     exactly like the element-by-element pass does.
     """

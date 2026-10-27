@@ -52,6 +52,8 @@ bank-collector --bank alfa --snapshot                                # + обе�
 
 # Если браузер подключён через реле Playwriter, вместо порта отладки можно дать его CDP-адрес:
 bank-collector --bank alfa --cdp-url "ws://<host>:19988/cdp?token=<token>"
+# ...или через переменную окружения, чтобы токен не попадал в список процессов (флаг важнее):
+BANK_COLLECTOR_CDP_URL="ws://<host>:19988/cdp?token=<token>" bank-collector --bank alfa
 
 ```
 

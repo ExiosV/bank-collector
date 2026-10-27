@@ -45,6 +45,15 @@ import time
 from . import __version__, report as report_mod
 from .collect import DEFAULT_TIMEOUT_MS, collect
 from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
+
+#: The environment variable that may hold the CDP URL (a relay URL carries a
+#: token, which must not sit on the command line).
+CDP_URL_ENV = "BANK_COLLECTOR_CDP_URL"
+
+
+def _cdp_url(args):
+    """The CDP URL: ``--cdp-url``, else ``$BANK_COLLECTOR_CDP_URL``, else the default."""
+    return args.cdp_url or os.environ.get(CDP_URL_ENV) or DEFAULT_CDP_URL
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
 from .unlock import (
@@ -98,11 +107,13 @@ def build_parser():
     parser.add_argument("--bank", metavar="NAME", help="bank profile to use (see --list-profiles)")
     parser.add_argument(
         "--cdp-url",
-        default=DEFAULT_CDP_URL,
+        default=None,
         metavar="URL",
         help=(
-            "CDP endpoint of the browser you started yourself "
-            "(default: %(default)s). A playwriter relay URL is accepted too."
+            "CDP endpoint of the browser you started yourself (default: $%s, "
+            "else %s). A playwriter relay URL is accepted too; prefer the "
+            "environment variable when the URL carries a token, so it does not "
+            "show up in the process list." % (CDP_URL_ENV, DEFAULT_CDP_URL)
         ),
     )
     parser.add_argument(
@@ -513,7 +524,7 @@ def main(argv=None):
             parser.error("--bank is required with --import-statement")
         if args.enter_code:
             parser.error("--enter-code cannot be used with --import-statement")
-        if args.cdp_url != DEFAULT_CDP_URL:
+        if args.cdp_url is not None:
             parser.error("--cdp-url cannot be used with --import-statement")
         if args.as_json or args.as_csv:
             parser.error("--json/--csv cannot be used with --import-statement")
@@ -536,7 +547,7 @@ def main(argv=None):
         profile = _without_scroll(profile)
 
     try:
-        playwright, browser = connect(args.cdp_url, timeout_ms=args.timeout)
+        playwright, browser = connect(_cdp_url(args), timeout_ms=args.timeout)
     except BrowserUnavailable as exc:
         sys.stderr.write("browser error: %s\n" % exc)
         return EXIT_NO_BROWSER

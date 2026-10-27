@@ -31,11 +31,13 @@
 # appended (infinite scroll, no button). A day header can therefore scroll
 # out of the DOM while some of its operations are still rendered. Those rows
 # would have no header in that pass, so every round keeps its operation rows
-# (their content key and date) and the leading rows of the next round are
-# dated by their OVERLAP with the round before: the longest prefix of the
-# leading block that appears as a contiguous run in the previous window
-# (the last occurrence wins) gives the whole block that day's date — all rows
-# before a round's first header belong to one day. An unparsed or skipped
+# (their content key and date, and its headers) and the leading rows of the
+# next round are dated by their OVERLAP with the round before: the longest
+# run (at least 2 rows) that is a suffix of the previous window and a prefix
+# of this one gives the whole leading block the date of the matching row —
+# all rows before a round's first header belong to one day. Anchoring at both
+# ends matters: looking the block up anywhere in the previous window dated a
+# recurring payment by the wrong day in a live run. An unparsed or skipped
 # header therefore cannot misdate them. Rows with no overlap at all (first
 # pass, a gap between windows, a header that was not rendered) are skipped,
 # counted in `headerless_rows`, reported by a warning, and make the run

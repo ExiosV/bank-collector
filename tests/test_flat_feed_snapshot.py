@@ -306,10 +306,12 @@ def test_the_element_path_aligns_the_leading_block_like_the_snapshot_path():
             _feed(
                 # No header at all: only the overlap with the first window
                 # can date these rows.
+                _operation("Магазин А (тест)", "−10 ₽"),
                 _operation("Магазин Б (тест)", "−20 ₽"),
                 _operation("Магазин В (тест)", "−30 ₽"),
             ),
             _feed(
+                _operation("Магазин Б (тест)", "−20 ₽"),
                 _operation("Магазин В (тест)", "−30 ₽"),
                 _operation("Магазин Г (тест)", "−40 ₽"),
                 _header("26 октября"),

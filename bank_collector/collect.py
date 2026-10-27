@@ -588,17 +588,6 @@ def _content_key(row, record_def):
     )
 
 
-def _last_occurrence(haystack, needle):
-    """The index of the last contiguous *needle* inside *haystack*, or None."""
-    size = len(needle)
-    if not size or size > len(haystack):
-        return None
-    for index in range(len(haystack) - size, -1, -1):
-        if haystack[index : index + size] == needle:
-            return index
-    return None
-
-
 def _count_headerless(counter, leading, carry=None):
     """Count the operation rows a round had to skip for lack of a date.
 
@@ -626,42 +615,44 @@ def _count_headerless(counter, leading, carry=None):
     counter["headerless_rows"] = counter.get("headerless_rows", 0) + added
 
 
-def _align_leading(leading_keys, previous_rows):
-    """Date the leading rows of a round by their overlap with the round before.
+#: How many rows two consecutive windows must share before the top of the
+#: newer one is dated from the older one. One shared row could be a
+#: coincidence (the same 320 ₽ phone top-up on two days); two in a row, with
+#: the headers between them, is the overlap of the scroll step.
+_MIN_OVERLAP = 2
 
-    The rendered windows of two consecutive scroll rounds overlap: the rows
-    at the top of this round (before its first header) continue the day whose
-    header was seen earlier, and those of them that were already rendered in
-    the previous round carry that day's date.  The overlap is therefore a
-    prefix of *leading_keys*; it is looked up as a contiguous run in
-    *previous_rows* (``{"key", "header"}`` in DOM order), and the LAST
-    occurrence wins, because the scroll moves the window down the feed.
 
-    A full match is tried first; when the newest rows of the leading block
-    were appended between the rounds, the longest matching prefix is used
-    instead — all rows before a round's first header belong to one day, so
-    the whole block inherits the date of the matched rows.  ``None`` means
-    there is no usable overlap (no overlap at all, a gap between the
-    windows, an unparsed or skipped header, or the first round): the caller
-    skips those rows and counts them.
+def _header_key(header):
+    """The sequence key of a day header: its parsed date, else its raw text."""
+    return ("H", _row_date(header) or _field_text(header, "date") or repr(sorted(header)))
+
+
+def _align_leading(current_rows, previous_rows, leading_count):
+    """Date the leading rows of a round by the overlap with the round before.
+
+    Two consecutive windows of a virtualised feed overlap: the bottom of the
+    previous window is the top of this one. The overlap is therefore found as
+    the longest run that is a SUFFIX of *previous_rows* and a PREFIX of
+    *current_rows* (both in DOM order, headers included, ``{"key", "header"}``
+    entries) — anchored at both ends, so a row that merely repeats elsewhere
+    (a recurring payment) cannot pull the block onto another day. The
+    *leading_count* rows before this round's first header all belong to one
+    day: the day of the previous row that matches ``current_rows[0]``.
+
+    ``None`` means no overlap of at least ``_MIN_OVERLAP`` rows (the first
+    round, a gap between the windows, an unparsed header in the way): the
+    caller skips those rows and counts them.
     """
-    if not leading_keys or not previous_rows:
+    if not leading_count or not previous_rows or not current_rows:
         return None
-    keys = [row.get("key") for row in previous_rows]
-    for size in range(min(len(leading_keys), len(keys)), 0, -1):
-        index = _last_occurrence(keys, list(leading_keys[:size]))
-        if index is None:
-            continue
-        matched = previous_rows[index : index + size]
-        headers = [row.get("header") for row in matched]
-        if any(header is None for header in headers):
-            return None
-        dates = {_row_date(header) for header in headers}
-        if len(dates) != 1 or None in dates:
-            # The matched run straddles two days (or has no date): no
-            # alignment can be trusted, so the rows are left undated.
-            return None
-        return headers[0]
+    current = [row.get("key") for row in current_rows]
+    previous = [row.get("key") for row in previous_rows]
+    for size in range(min(len(current), len(previous)), _MIN_OVERLAP - 1, -1):
+        if previous[len(previous) - size:] == current[:size]:
+            header = previous_rows[len(previous) - size].get("header")
+            if header is None or not _row_date(header):
+                return None
+            return header
     return None
 
 
@@ -698,6 +689,7 @@ def _records_from_snapshot(
             current_header = _record_from_snapshot(
                 fields, header_def, "%s.header" % row_prefix, warnings, now=now
             )
+            round_rows.append({"key": _header_key(current_header), "header": current_header})
             seen_header = True
             continue
         if not seen_header:
@@ -710,19 +702,16 @@ def _records_from_snapshot(
             )
             key = _content_key(item_fields, record_def)
             leading.append((row_prefix, item_fields, key, local_warnings))
-            round_rows.append({"key": key, "header": None})
+            round_rows.append({"key": ("O",) + tuple(key), "header": None})
             continue
 
         item_fields = _record_from_snapshot(fields, record_def, row_prefix, warnings, now=now)
         results.append(_merge_row(current_header, item_fields, row_prefix, warnings))
         round_rows.append(
-            {"key": _content_key(item_fields, record_def), "header": current_header}
+            {"key": ("O",) + tuple(_content_key(item_fields, record_def)), "header": current_header}
         )
 
-    attribution = _align_leading(
-        [entry[2] for entry in leading],
-        (carry or {}).get("rows") or [],
-    )
+    attribution = _align_leading(round_rows, (carry or {}).get("rows") or [], len(leading))
     leading_results = []
     if attribution is not None:
         for row_prefix, item_fields, _key, local_warnings in leading:
@@ -834,6 +823,7 @@ def _extract_rows(
                 current_header = extract_record(
                     row, header_def, "%s.header" % row_prefix, warnings, now=now
                 )
+                round_rows.append({"key": _header_key(current_header), "header": current_header})
                 seen_header = True
                 continue
             if not seen_header:
@@ -846,18 +836,15 @@ def _extract_rows(
                 )
                 key = _content_key(item, record_def)
                 leading.append((row_prefix, item, key, local_warnings))
-                round_rows.append({"key": key, "header": None})
+                round_rows.append({"key": ("O",) + tuple(key), "header": None})
                 continue
             item = extract_record(row, record_def, row_prefix, warnings, now=now)
             results.append(_merge_row(current_header, item, row_prefix, warnings))
             round_rows.append(
-                {"key": _content_key(item, record_def), "header": current_header}
+                {"key": ("O",) + tuple(_content_key(item, record_def)), "header": current_header}
             )
 
-        attribution = _align_leading(
-            [entry[2] for entry in leading],
-            (carry or {}).get("rows") or [],
-        )
+        attribution = _align_leading(round_rows, (carry or {}).get("rows") or [], len(leading))
         leading_results = []
         if attribution is not None:
             for row_prefix, item, _key, local_warnings in leading:

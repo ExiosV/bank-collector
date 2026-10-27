@@ -378,14 +378,18 @@ def test_two_identical_operations_never_rendered_together_are_merged():
 
     Two identical operations of one day that a virtualised list reveals one
     at a time look like a repeat of the row already collected, so the second
-    one is merged. Both rows are dated (the header is carried), so the loss is
-    not visible in ``headerless_rows``.
+    one is merged. Both rows are dated (the overlap dates the second window),
+    so the loss is not visible in ``headerless_rows``.
     """
     window_one = _feed(
         _header("27 октября"),
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
     )
     window_two = _feed(
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
         # The second, identical coffee: rendered only after the first one
         # left the DOM, so the two are never in one window together.
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
@@ -423,12 +427,14 @@ def test_a_day_longer_than_one_window_keeps_all_its_operations():
         _operation("Магазин Б (тест)", "−20 ₽"),
     )
     window_two = _feed(
+        _operation("Магазин А (тест)", "−10 ₽"),
         _operation("Магазин Б (тест)", "−20 ₽"),
         _operation("Магазин В (тест)", "−30 ₽"),
         _operation("Магазин Г (тест)", "−40 ₽"),
         _header("26 октября"),
     )
     window_three = _feed(
+        _operation("Магазин Г (тест)", "−40 ₽"),
         _header("26 октября"),
         _operation("Магазин Д (тест)", "−50 ₽"),
     )
@@ -548,11 +554,13 @@ def test_a_round_with_no_header_stays_inside_the_day_of_the_overlap():
         _operation("Магазин Б (тест)", "−20 ₽"),
     )
     window_two = _feed(
+        _operation("Магазин А (тест)", "−10 ₽"),
         _operation("Магазин Б (тест)", "−20 ₽"),
         _operation("Магазин В (тест)", "−30 ₽"),
         _operation("Магазин Г (тест)", "−40 ₽"),
     )
     window_three = _feed(
+        _operation("Магазин В (тест)", "−30 ₽"),
         _operation("Магазин Г (тест)", "−40 ₽"),
         _operation("Магазин Д (тест)", "−50 ₽"),
         _header("26 октября"),
@@ -871,3 +879,49 @@ def test_header_selector_must_be_a_non_empty_string(tmp_path):
     )
     with pytest.raises(ProfileError, match="header.selector"):
         _write_profile(tmp_path, body)
+
+
+def test_a_leading_block_that_repeats_a_later_day_keeps_its_own_day():
+    """Live regression (2026-10-24): the same train ticket and phone top-up on two
+    days. Looking the leading block up as "the last place it occurs" in the
+    previous window dated the newer day's rows by the older day and added them a
+    second time. The overlap is a suffix of the previous window and a prefix of
+    this one, so the block lands on its own day."""
+    ticket = ("Ж/д билет (тест)", "−1 978,5 ₽", "Ж/д билеты")
+    phone = ("Связь (тест)", "−320 ₽", "Мобильная связь")
+    window_one = _feed(
+        _header("25 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+        _header("24 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+    )
+    window_two = _feed(
+        # The 25th's rows are now at the top, above the first header of this window.
+        _operation(*ticket),
+        _operation(*phone),
+        _header("24 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+        _header("23 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    dated = [(row["date"]["value"], row["title"]["value"]) for row in result["transactions"]]
+    assert dated == [
+        ("2026-10-25", "Ж/д билет (тест)"),
+        ("2026-10-25", "Связь (тест)"),
+        ("2026-10-24", "Ж/д билет (тест)"),
+        ("2026-10-24", "Связь (тест)"),
+        ("2026-10-23", "Магазин А (тест)"),
+    ]
+    assert result["scroll"]["headerless_rows"] == 0

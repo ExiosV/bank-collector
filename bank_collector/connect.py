@@ -52,7 +52,18 @@ def resolve_cdp_url(flag=None):
     """The CDP URL: the explicit flag, else ``$BANK_COLLECTOR_CDP_URL``, else the default."""
     if flag is not None:
         return flag
-    return os.environ.get(CDP_URL_ENV) or DEFAULT_CDP_URL
+    value = os.environ.get(CDP_URL_ENV)
+    if value is None:
+        return DEFAULT_CDP_URL
+    if not value.strip():
+        # A broken env file must fail loudly, not attach to whatever holds port 9222.
+        raise BrowserUnavailable("$%s is set but empty." % CDP_URL_ENV)
+    return value.strip()
+
+
+#: Values shorter than this are not removed one by one (they would blank out
+#: ordinary words); the URL-shape patterns still mask them inside the URL.
+_MIN_SECRET_LEN = 4
 
 
 def _url_secrets(url):
@@ -61,14 +72,22 @@ def _url_secrets(url):
     A library error may repeat them without the URL around them (or
     percent-encoded), where the shape-based patterns cannot see them.
     """
-    parts = urlsplit(str(url))
+    try:
+        parts = urlsplit(str(url))
+        password = parts.password
+        visible = {parts.netloc.rpartition("@")[2], parts.hostname or "", str(parts.port or "")}
+    except ValueError:
+        # A malformed URL (a typo in the env file): the shape-based patterns still apply.
+        return []
     values = [value for _name, value in parse_qsl(parts.query, keep_blank_values=False)]
     # ...and as written, undecoded ("+" stays "+"), since that is what an error repeats.
     values += [pair.partition("=")[2] for pair in parts.query.split("&")]
-    values += [parts.password or "", parts.fragment or ""]
+    values += [password or "", parts.fragment or ""]
     found = set()
     for value in values:
-        if len(value) >= 6:
+        # Very short values would blank out ordinary words; host and port are what the
+        # operator needs to fix the connection and are not secrets.
+        if len(value) >= _MIN_SECRET_LEN and value not in visible:
             found.update((value, quote(value, safe="")))
     return sorted(found, key=len, reverse=True)
 

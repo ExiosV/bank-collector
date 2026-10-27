@@ -106,11 +106,52 @@ def test_a_failed_attach_never_prints_the_token(monkeypatch, capsys):
     assert TOKEN not in err
 
 
-def test_a_blank_environment_variable_is_refused(monkeypatch):
+def test_a_blank_environment_variable_is_refused(monkeypatch, capsys):
     monkeypatch.setenv(CDP_URL_ENV, "  ")
-    with pytest.raises(SystemExit) as raised:
-        main(["--bank", "alfa"])
-    assert raised.value.code == 2
+    assert main(["--bank", "alfa"]) == cli.EXIT_NO_BROWSER
+    assert "is set but empty" in capsys.readouterr().err
+
+
+def test_a_blank_environment_variable_does_not_block_offline_commands(monkeypatch, tmp_path):
+    monkeypatch.setenv(CDP_URL_ENV, " ")
+    assert main(["--list-profiles"]) == 0
+    code = main(["--bank", "alfa", "--import-statement", STATEMENT, "--out", str(tmp_path)])
+    assert code == 0
+
+
+def test_resolve_refuses_a_blank_environment_variable(monkeypatch):
+    monkeypatch.setenv(CDP_URL_ENV, "")
+    with pytest.raises(BrowserUnavailable):
+        resolve_cdp_url(None)
+
+
+def test_a_malformed_url_still_gives_browser_unavailable(monkeypatch):
+    class FakeChromium(object):
+        def connect_over_cdp(self, url, timeout=None):
+            raise RuntimeError("bad url %s" % url)
+
+    class FakePlaywright(object):
+        chromium = FakeChromium()
+
+        def stop(self):
+            pass
+
+    fake = types.SimpleNamespace(start=lambda: FakePlaywright())
+    monkeypatch.setattr(connect_mod, "_import_playwright", lambda: (lambda: fake))
+    with pytest.raises(BrowserUnavailable) as raised:
+        connect_mod.connect("ws://[::1:19988/cdp?token=%s" % TOKEN)
+    assert TOKEN not in str(raised.value)
+
+
+def test_host_and_port_survive_literal_redaction():
+    url = "ws://relay.example:19988/cdp?host=relay.example:19988&token=%s" % TOKEN
+    text = redact_url("at relay.example:19988 failed: %s" % TOKEN, url)
+    assert "relay.example:19988" in text
+    assert TOKEN not in text
+
+
+def test_short_values_are_not_removed_from_ordinary_text():
+    assert redact_url("the cat sat", "ws://h:1/cdp?k=cat") == "the cat sat"
 
 
 def test_redact_url_removes_a_fragment_token():

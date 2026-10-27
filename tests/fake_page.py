@@ -8,8 +8,7 @@ so this module implements the small part of the DOM that
 * ``wait_for_selector(selector, timeout=...)``
 * ``query_all(selector)``
 * ``snapshot_rows(spec)`` -- one pass over a flat feed, like the real page's
-  JS (an element may carry a ``top`` to simulate a visual order that differs
-  from the document order; the default is the DOM index)
+  JS, returning the rows in DOM order
 * ``content()`` / ``inner_text(selector)``
 * ``scroll_by(dy)`` -- read-only: it only moves the viewport
 * a ``click()`` hook: ``on_click(page, element)`` is called when a test
@@ -55,10 +54,6 @@ class FakeElement(object):
         self.parent = parent
         self.children = []
         self._text_parts = []
-        #: Optional vertical position on screen, read by ``snapshot_rows``.
-        #: ``None`` means "DOM order", so a test that wants a visual order
-        #: different from the document order sets it explicitly.
-        self.top = None
         #: Everything a test wrote into this element, in order: ("fill", value)
         #: or ("click", None).  The real page has no such bookkeeping; it is
         #: here so that the unlock tests can prove that nothing else is tapped.
@@ -333,7 +328,7 @@ _SELECTOR_CACHE = {}
 
 
 def _split_selector_list(selector):
-    """Split a comma-separated selector list on its top-level commas.
+    """Split a comma-separated selector list on its outermost commas.
 
     Commas inside ``[...]``, ``(...)`` or quotes belong to one selector and
     are left alone.
@@ -528,14 +523,6 @@ class FakePage(object):
     def query_all(self, selector):
         return self.root.query_all(selector)
 
-    def _snapshot_top(self, element, index):
-        """The vertical position of *element*: its ``top``, else the DOM index."""
-        top = getattr(element, "top", None)
-        try:
-            return float(top)
-        except (TypeError, ValueError):
-            return float(index)
-
     @staticmethod
     def _snapshot_field(row, field):
         """Read one field of *row* the way the page-side JS reads it."""
@@ -555,7 +542,7 @@ class FakePage(object):
         """Read a flat feed in one pass, like the real page's JS does.
 
         The result has the same shape as ``PageAdapter.snapshot_rows``:
-        ``{"index", "top", "header", "fields"}`` per row, in DOM order.  A
+        ``{"index", "header", "fields"}`` per row, in DOM order.  A
         header row carries ``header_fields``, an operation row ``fields``.
         Every call is logged in ``snapshot_calls`` so a test can prove that
         one extraction makes exactly one pass.
@@ -577,7 +564,6 @@ class FakePage(object):
             results.append(
                 {
                     "index": index,
-                    "top": self._snapshot_top(row, index),
                     "header": header,
                     "fields": fields,
                 }

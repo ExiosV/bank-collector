@@ -5,10 +5,10 @@
 took about a minute per scroll round and read a feed that re-renders under
 it. The driver now asks a page that offers ``snapshot_rows(spec)`` for the
 whole feed in ONE read-only page-side pass and dates every operation by the
-day header nearest *above it on screen*. These tests pin that down:
+day header that precedes it in DOM order. These tests pin that down:
 
 * a page-side pass per extraction, with only selectors/attributes going over;
-* the visual order wins over the document order;
+* DOM order (not geometry) dates the rows;
 * the snapshot path and the element-by-element fallback agree;
 * a header whose text loses its day total keeps the same date.
 """
@@ -119,7 +119,7 @@ def test_the_adapter_makes_exactly_one_evaluate_call():
 
         def evaluate(self, script, argument):
             self.calls.append((script, argument))
-            return [{"index": 0, "top": 0.0, "header": True, "fields": {}}]
+            return [{"index": 0, "header": True, "fields": {}}]
 
     raw = RawPage()
     rows = PageAdapter(raw).snapshot_rows(spec)
@@ -131,14 +131,17 @@ def test_the_adapter_makes_exactly_one_evaluate_call():
 
 
 # ---------------------------------------------------------------------------
-# Visual order, not document order
+# DOM order, not geometry
 # ---------------------------------------------------------------------------
 
 
-def test_rows_are_dated_in_dom_order_whatever_the_geometry_says():
-    """T-Bank's header <li> all report the list's top (the header itself is absolutely
-    positioned): ordering by geometry dated whole screens by the wrong day (live run,
-    2026-10-27). DOM order is what dates an operation."""
+def test_rows_are_dated_by_dom_order():
+    """The header that precedes an operation in the DOM dates it.
+
+    T-Bank's header <li> all report the list's top (the header itself is
+    absolutely positioned), so geometry carries no information: a row is
+    dated by the day header before it in the snapshot, in DOM order.
+    """
     page = FakePage(
         _feed(
             _header("27 октября"),
@@ -147,11 +150,6 @@ def test_rows_are_dated_in_dom_order_whatever_the_geometry_says():
             _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
         )
     )
-    tops = [563.0, 607.0, 563.0, 755.0]
-    rows = page.query_all(ROW)
-    assert len(rows) == 4
-    for row, top in zip(rows, tops):
-        row.top = top
 
     warnings = []
     result = extract_section(
@@ -363,7 +361,7 @@ def test_the_real_snapshot_js_reads_the_tbank_fixture(tmp_path):
     assert proc.returncode == 0, proc.stderr
     snapshot = json.loads(proc.stdout)
     assert [row["header"] for row in snapshot] == [True, False, False, True, False, True, False]
-    assert all(isinstance(row["top"], (int, float)) for row in snapshot)
+    assert [row["index"] for row in snapshot] == [0, 1, 2, 3, 4, 5, 6]
     assert snapshot[0]["fields"]["date"]["found"] is True
     assert parse_ru_date(snapshot[0]["fields"]["date"]["text"], now=FIXED_NOW) == "2026-10-27"
     assert snapshot[1]["fields"]["title"]["text"] == "Магазин «Пример»"

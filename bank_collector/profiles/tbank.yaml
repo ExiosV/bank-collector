@@ -23,15 +23,26 @@
 # header <li> reports the list's top, the header itself being absolutely
 # positioned.) The date is parsed by `parse: ru_date`
 # ("27 октября", "Сегодня", "Вчера", an optional year; the day total after
-# the date is ignored).
+# the date is ignored), anchored on the cabinet's own calendar day
+# (`timezone: Europe/Moscow`), not on UTC.
 #
 # The list is VIRTUALISED: while scrolling, the number of rendered operations
 # stays around 25–31 — old rows are removed from the DOM and older ones are
 # appended (infinite scroll, no button). A day header can therefore scroll
-# out of the DOM while some of its operations are still rendered; those rows
-# have no date in that pass and are skipped silently (they were read in an
-# earlier round, while their header was still there) and counted in the
-# scroll report as `headerless_rows`.
+# out of the DOM while some of its operations are still rendered. Those rows
+# would have no header in that pass, so the driver carries the ordered list
+# of headers seen so far across the scroll rounds of one section: operations
+# above a round's first header take the header that immediately precedes it
+# in that list, and a round without any header takes the last header
+# carried. Only a pass with nothing suitable carried (the very first pass may
+# start with operations) skips its leading rows, counted in `headerless_rows`.
+#
+# Dedup limitation (honest): a row is recognised as a duplicate by
+# (date, title, category, amount), counted per round. Two identical
+# operations of the same day therefore stay two rows only if at least one
+# rendered window shows them together. A virtualised window that reveals them
+# one at a time makes the second one look like a repeat of the first and it
+# is merged — a known limitation of counting the multiset per round.
 #
 # `step_px` is smaller than the ~1100 px viewport on purpose, so consecutive
 # rounds overlap and no row can slip between two scroll steps. `settle_ms` is
@@ -39,19 +50,24 @@
 #
 # status: verified on 2026-10-27 against the live cabinet: 325 operations
 # from 2025-12-31 to 2026-10-25 in 186 s (44 rounds, stop: date, complete:
-# true, no clicks). Every day whose header showed its expense total (86 of 138
-# days) was checked against the sum of the collected negative amounts: 85 match
-# to the ruble, the one remaining day differs only by a 300 000 ₽ "Покупка по
-# QR" (finance) that T-Bank leaves out of its own day total; no day has fewer
-# expenses than its header, dates never go backwards, and no operation repeats
-# on neighbouring days except genuinely recurring ones (transit fares, the
-# same transfer from another bank).
+# true, no clicks). Only EXPENSES were checked numerically, and only on the 86
+# days (of 138) whose header shows an expense total: 85 of them match the sum
+# of the collected negative amounts to the ruble; the 86th differs only by a
+# 300 000 ₽ "Покупка по QR" (finance) that T-Bank leaves out of its own day
+# total. Income was not checked numerically. No day has fewer expenses than
+# its header and dates never go backwards.
+#
+# The rows carry NO label saying "this is my own transfer": titles like
+# "Себе в другой банк", "Себе из другого банка", "Пополнение брокерского
+# счета" and "Вывод с брокерского счета" are ordinary operations here and
+# must be filtered downstream before any P&L is computed.
 #
 # Balances are not described yet: this profile reads the operations page
 # only. Balances come in a later step (other page / other markup).
 bank: tbank
 status: verified
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain; those rows are skipped in that pass and counted in scroll.headerless_rows. The scroll step is smaller than the viewport so rounds overlap. Verified 2026-10-27: 325 operations back to 2025-12-31, day expense totals match the cabinet's own day headers."
+timezone: Europe/Moscow
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: headers seen so far are carried across the scroll rounds and date those rows. Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals (85 of 86 such days; the 86th differs by a QR purchase the bank excludes), income not checked numerically. Own-transfer titles are not labelled and must be filtered downstream. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
 

@@ -6,9 +6,10 @@ support a new bank — no Python, no code, just selectors.
 Canonical form::
 
     bank: example
-    status: verified            # verified | unverified | draft
+    status: verified            # verified | unverified
     url: "https://example.invalid/cabinet"
     wait_for: "#dashboard"      # CSS selector, waits for the SPA to render
+    timezone: Europe/Moscow     # optional IANA name; anchors ru_date's "today"
     balances:
       - row: ".balance-card"    # optional: repeating container
         fields:
@@ -28,6 +29,10 @@ Canonical form::
 
 ``bank``, ``status``, ``url`` and ``wait_for`` are required. ``balances`` and
 ``transactions`` are optional, but at least one of them must be there.
+``timezone`` is optional: an IANA name (``Europe/Moscow`` by default) of the
+cabinet's own timezone. Day headers are rendered there, so ``parse: ru_date``
+resolves "Сегодня", "Вчера" and a year-less date on that calendar day, not on
+the UTC one.
 
 A record (one entry of ``balances`` or ``transactions``) accepts the keys
 ``row``, ``fields``, ``url``, ``wait_for``, ``items``, ``header`` and
@@ -62,12 +67,14 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
     Optional: for a *flat* feed where day headers and operations are siblings
     in one list. A mapping with exactly ``selector`` (a CSS selector inside a
     row that marks it as a day header) and ``fields`` (the header's field
-    specifications, normally the date). ``row`` then matches every row of the
-    feed in document order: a header row updates the current header values
-    and is not emitted, every other row inherits them (the operation wins on
-    a field-name clash). Operations rendered before the first header of a
-    pass have no date and are skipped silently. ``header`` cannot be combined
-    with ``items``.
+    specifications, normally the date). ``row`` (required with ``header``)
+    then matches every row of the feed in document order: a header row
+    updates the current header values and is not emitted, every other row
+    inherits them (the operation wins on a field-name clash). Operations
+    rendered before the first header of a pass are dated by the header
+    carried over from earlier scroll rounds of the same section; only when
+    nothing suitable was carried are they skipped silently. ``header``
+    cannot be combined with ``items``.
 ``scroll``
     Optional: how far and how long to scroll the rendered list, so that the
     rows a cabinet appends while the list is scrolled are read as well.
@@ -161,6 +168,7 @@ The keys of the section and what the validator accepts:
 
 import os
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import miniyaml
 
@@ -172,14 +180,14 @@ __all__ = [
     "VALID_STATUSES",
 ]
 
-VALID_STATUSES = ("verified", "unverified", "draft")
+VALID_STATUSES = ("verified", "unverified")
 
 #: The field options that post-process a value after the regex step.
 _PARSE_KINDS = ("ru_date",)
 
 _REQUIRED_KEYS = ("bank", "status", "url", "wait_for")
 _OPTIONAL_KEYS = ("balances", "transactions")
-_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes", "unlock")
+_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes", "unlock", "timezone")
 _FIELD_KEYS = ("selector", "attr", "regex", "group", "parse", "optional")
 
 # The keys the optional ``unlock`` section may carry.  It describes how the
@@ -687,6 +695,12 @@ def _normalise_record(index, record, section, where):
             "the same thing" % (where, index)
         )
 
+    if normalised_header is not None and row is None:
+        raise ProfileError(
+            "%s: record #%d: 'header' needs a 'row' — the header selector is looked "
+            "up inside every row of the feed" % (where, index)
+        )
+
     normalised_scroll = None
     if scroll is not None:
         if row is None:
@@ -833,6 +847,25 @@ def _validate(data, path):
     wait_for = data["wait_for"]
     if not isinstance(wait_for, str) or not wait_for.strip():
         raise ProfileError("%s: 'wait_for' must be a non-empty CSS selector" % where)
+
+    # Optional: the cabinet's own timezone (an IANA name). Day headers are
+    # rendered there, so "Сегодня" must be resolved on that calendar day.
+    timezone_name = data.get("timezone")
+    if timezone_name is not None:
+        if not isinstance(timezone_name, str) or not timezone_name.strip():
+            raise ProfileError(
+                "%s: 'timezone' must be a non-empty IANA timezone name (e.g. "
+                "Europe/Moscow)" % where
+            )
+        timezone_name = timezone_name.strip()
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ProfileError(
+                "%s: 'timezone' %r is not a known IANA timezone name"
+                % (where, timezone_name)
+            )
+        data["timezone"] = timezone_name
 
     # At least one of the two sections must be described.
     if "balances" not in data and "transactions" not in data:

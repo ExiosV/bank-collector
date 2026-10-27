@@ -126,6 +126,8 @@ def test_the_profile_is_read_only_and_verified():
     assert profile["status"] == "verified"
     assert profile["url"] == TBANK_URL
     assert profile["wait_for"] == OPERATION
+    # Day headers are read in the cabinet's own timezone, not UTC.
+    assert profile["timezone"] == "Europe/Moscow"
 
     # Balances are a later step: the operations page is all this profile reads.
     assert profile["balances"] == []
@@ -176,6 +178,65 @@ def test_ru_date_forms(text, expected):
 )
 def test_ru_date_garbage_is_not_a_date(text):
     assert parse_ru_date(text, now=FIXED_NOW) is None
+
+
+def test_ru_date_is_anchored_on_the_cabinet_local_day():
+    """01:30 MSK on 1 January is still 31 December in UTC — the cabinet wins."""
+    now = datetime(2026, 12, 31, 22, 30, tzinfo=timezone.utc)
+    page = FakePage(
+        _feed(
+            _header("Сегодня−1 ₽"),
+            _operation("Сегодня (тест)", "−1 ₽"),
+            _header("1 января"),
+            _operation("Первое (тест)", "−2 ₽"),
+            _header("31 декабря"),
+            _operation("Тридцать первое (тест)", "−3 ₽"),
+        ),
+        url=TBANK_URL,
+    )
+
+    result = collect(
+        page,
+        _profile(
+            {
+                "stop_before_date": None,
+                "stop_after_empty_rounds": 1,
+                "max_rounds": 1,
+                "settle_ms": 0,
+            }
+        ),
+        timeout_ms=1,
+        now=now,
+    )
+
+    # fetched_at stays the UTC instant of the run.
+    assert result["fetched_at"] == "2026-12-31T22:30:00Z"
+    assert [row["date"]["value"] for row in result["transactions"]] == [
+        "2027-01-01",  # Сегодня, on the Moscow calendar
+        "2027-01-01",  # 1 января without a year
+        "2026-12-31",  # 31 декабря: a year back, it would otherwise be future
+    ]
+
+
+def test_a_profile_without_timezone_uses_moscow_by_default():
+    now = datetime(2026, 12, 31, 22, 30, tzinfo=timezone.utc)
+    page = FakePage(
+        _feed(_header("Сегодня−1 ₽"), _operation("Сегодня (тест)", "−1 ₽")),
+        url=TBANK_URL,
+    )
+    profile = _profile(
+        {
+            "stop_before_date": None,
+            "stop_after_empty_rounds": 1,
+            "max_rounds": 1,
+            "settle_ms": 0,
+        }
+    )
+    del profile["timezone"]
+
+    result = collect(page, profile, timeout_ms=1, now=now)
+
+    assert result["transactions"][0]["date"]["value"] == "2027-01-01"
 
 
 def test_an_unparseable_header_date_warns_and_keeps_the_raw_text():
@@ -263,14 +324,19 @@ def test_collect_reads_dates_from_headers_and_signs_from_amounts():
 # ---------------------------------------------------------------------------
 
 
-def test_a_virtualised_window_drops_old_rows_without_duplicating_them():
-    """Two equal coffees on one day stay two rows, even across re-renders."""
+def test_two_identical_operations_under_one_header_stay_two_rows():
+    """Two equal coffees rendered under their day header are two operations.
+
+    A re-render repeats both rows; the per-round multiset dedup keeps exactly
+    the two that were collected the first time.
+    """
     window_one = _feed(
         _header("27 октября"),
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
     )
     window_two = _feed(
+        _header("27 октября"),
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
         _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
         _header("26 октября"),
@@ -298,14 +364,93 @@ def test_a_virtualised_window_drops_old_rows_without_duplicating_them():
     ]
     assert result["scroll"]["stop"] == "empty"
     assert result["scroll"]["complete"] is True
-    # The two coffees rendered before the first header of the second window:
-    # skipped there, but already kept from the first window. The counter adds
-    # up the passes, so only its lower bound is pinned.
-    assert result["scroll"]["headerless_rows"] >= 2
+    # Both coffees sit under their header in every window, so no row is
+    # headerless and nothing is counted.
+    assert result["scroll"]["headerless_rows"] == 0
     assert page.writes == []
 
 
-def test_a_header_that_scrolled_out_keeps_the_rows_read_earlier():
+def test_two_identical_operations_never_rendered_together_are_merged():
+    """Known limitation: the multiset is counted per rendered window.
+
+    Two identical operations of one day that a virtualised list reveals one
+    at a time look like a repeat of the row already collected, so the second
+    one is merged. Both rows are dated (the header is carried), so the loss is
+    not visible in ``headerless_rows``.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+    )
+    window_two = _feed(
+        # The second, identical coffee: rendered only after the first one
+        # left the DOM, so the two are never in one window together.
+        _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+        _header("26 октября"),
+        _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    coffees = [
+        row for row in result["transactions"] if row["title"]["value"] == "Кофе (тест)"
+    ]
+    assert len(coffees) == 1, "the two identical rows are merged (known limitation)"
+    assert coffees[0]["date"]["value"] == "2026-10-27"
+    assert result["scroll"]["headerless_rows"] == 0
+    assert page.writes == []
+
+
+def test_a_day_longer_than_one_window_keeps_all_its_operations():
+    """A virtualised day header leaves the DOM before its last operations.
+
+    The header seen in the first window is carried, so every operation of
+    that day — including the ones rendered after the header scrolled out — is
+    dated and kept.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
+    )
+    window_two = _feed(
+        _operation("Магазин Б (тест)", "−20 ₽"),
+        _operation("Магазин В (тест)", "−30 ₽"),
+        _operation("Магазин Г (тест)", "−40 ₽"),
+        _header("26 октября"),
+    )
+    window_three = _feed(
+        _header("26 октября"),
+        _operation("Магазин Д (тест)", "−50 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two, window_three])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    assert [(row["date"]["value"], row["title"]["value"]) for row in result["transactions"]] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Магазин Б (тест)"),
+        ("2026-10-27", "Магазин В (тест)"),
+        ("2026-10-27", "Магазин Г (тест)"),
+        ("2026-10-26", "Магазин Д (тест)"),
+    ]
+    assert result["scroll"]["headerless_rows"] == 0
+    assert _warnings(result) == []
+    assert page.writes == []
+
+
+def test_a_header_that_scrolled_out_still_dates_its_rows():
     window_one = _feed(
         _header("27 октября"),
         _operation("Магазин А (тест)", "−10 ₽"),
@@ -336,7 +481,9 @@ def test_a_header_that_scrolled_out_keeps_the_rows_read_earlier():
         "2026-10-27",
         "2026-10-26",
     ]
-    assert result["scroll"]["headerless_rows"] >= 2
+    # The first two rows are rendered before the first header of the second
+    # window: the carried 27 October header dates them, so none is skipped.
+    assert result["scroll"]["headerless_rows"] == 0
     assert result["scroll"]["stop"] == "empty"
     assert page.writes == []
 
@@ -374,7 +521,7 @@ def test_virtualised_scrolling_reaches_the_stop_date_and_is_complete():
     assert result["scroll"]["stop"] == "date"
     assert result["scroll"]["complete"] is True
     assert result["scroll"]["oldest_date"] == "2025-12-29"
-    assert result["scroll"]["headerless_rows"] >= 2
+    assert result["scroll"]["headerless_rows"] == 0
     assert _warnings(result) == []
     assert page.writes == []
 
@@ -388,7 +535,7 @@ def _write_profile(tmp_path, body):
     path = tmp_path / "tbank_broken.yaml"
     path.write_text(
         "bank: tbank_broken\n"
-        "status: draft\n"
+        "status: unverified\n"
         'url: "https://www.tbank.ru/mybank/operations/"\n'
         'wait_for: "#x"\n'
         "balances: []\n"
@@ -445,6 +592,21 @@ def test_optional_must_be_a_boolean(tmp_path):
         "        optional: 'yes'\n"
     )
     with pytest.raises(ProfileError, match="optional"):
+        _write_profile(tmp_path, body)
+
+
+def test_header_without_row_is_rejected(tmp_path):
+    body = (
+        "  - fields:\n"
+        "      amount:\n"
+        "        selector: '.amount'\n"
+        "    header:\n"
+        "      selector: '.day'\n"
+        "      fields:\n"
+        "        date:\n"
+        "          selector: '.day'\n"
+    )
+    with pytest.raises(ProfileError, match="needs a 'row'"):
         _write_profile(tmp_path, body)
 
 

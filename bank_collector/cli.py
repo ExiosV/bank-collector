@@ -511,6 +511,9 @@ def main(argv=None):
     if args.cdp_url is not None and not args.cdp_url.strip():
         # An empty --cdp-url "$CDP" in a script must not fall through silently.
         parser.error("--cdp-url is empty")
+    if args.cdp_url is None and CDP_URL_ENV in os.environ and not os.environ[CDP_URL_ENV].strip():
+        # A broken env file must fail loudly, not attach to whatever holds port 9222.
+        parser.error("$%s is set but empty" % CDP_URL_ENV)
 
     if args.list_profiles:
         _print_profiles()

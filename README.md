@@ -53,6 +53,10 @@ bank-collector --bank alfa --snapshot                                # + обе�
 # Браузер за реле Playwriter: адрес с токеном — только через переменную окружения из файла 0600,
 # не в командной строке и не в истории shell (флаг --cdp-url важнее переменной):
 #   ~/.config/bank-collector/cdp.env:  BANK_COLLECTOR_CDP_URL=ws://<host>:19988/cdp?token=<token>
+# Файл создаётся сразу с правами 0600 и заполняется в редакторе (не через echo — это история shell):
+#   install -d -m 700 ~/.config/bank-collector && install -m 600 /dev/null ~/.config/bank-collector/cdp.env
+#   "$EDITOR" ~/.config/bank-collector/cdp.env
+# Права этого файла инструмент не проверяет — проверьте сами: stat -c %a ~/.config/bank-collector/cdp.env
 set -a; . ~/.config/bank-collector/cdp.env; set +a
 bank-collector --bank alfa
 ```
@@ -60,8 +64,10 @@ bank-collector --bank alfa
 Для systemd то же самое — `EnvironmentFile=%h/.config/bank-collector/cdp.env` в юните. Переменная
 убирает токен из argv и истории команд, но не делает его невидимым совсем: окружение процесса видно
 тому же пользователю (`/proc/<pid>/environ`, `ps e`). В сообщениях об ошибке подключения адрес
-печатается без query-строки и `user:pass@` (`ws://<host>:19988/cdp?***`), так что в лог токен не
-попадает. `--cdp-url "ws://...?token=..."` по-прежнему работает, но кладёт токен в `ps` и в историю.
+печатается без query-строки, фрагмента и `user:pass@` (`ws://<host>:19988/cdp?***`), а значения из
+адреса вычищаются и из текста ошибки Playwright, так что в лог токен не попадает. Не включайте
+отладку Playwright (`DEBUG=pw:*`) в запуске по расписанию: она сама печатает адрес целиком.
+Пустая `BANK_COLLECTOR_CDP_URL=` — ошибка запуска (код 2), а не тихий переход на порт 9222. `--cdp-url "ws://...?token=..."` по-прежнему работает, но кладёт токен в `ps` и в историю.
 
 Выходные файлы: `data/<bank>.json`, `data/<bank>-balances.csv` и `data/<bank>-transactions.csv`.
 Коды возврата: `0` — успех, `2` — браузер недоступен, `3` — профиль невалиден/не найден,

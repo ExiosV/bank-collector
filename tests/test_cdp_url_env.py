@@ -104,3 +104,37 @@ def test_a_failed_attach_never_prints_the_token(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "relay.example:19988" in err
     assert TOKEN not in err
+
+
+def test_a_blank_environment_variable_is_refused(monkeypatch):
+    monkeypatch.setenv(CDP_URL_ENV, "  ")
+    with pytest.raises(SystemExit) as raised:
+        main(["--bank", "alfa"])
+    assert raised.value.code == 2
+
+
+def test_redact_url_removes_a_fragment_token():
+    assert TOKEN not in redact_url("ws://relay.example:19988/cdp#%s" % TOKEN)
+
+
+def test_redact_url_removes_a_bare_or_encoded_token_given_the_url():
+    url = "ws://relay.example:19988/cdp?token=%s+x" % TOKEN
+    text = "handshake failed for %s+x (encoded: %s%%2Bx)" % (TOKEN, TOKEN)
+    assert TOKEN not in redact_url(text, url)
+
+
+def test_connect_with_none_still_raises_browser_unavailable(monkeypatch):
+    class FakeChromium(object):
+        def connect_over_cdp(self, url, timeout=None):
+            raise RuntimeError("no endpoint")
+
+    class FakePlaywright(object):
+        chromium = FakeChromium()
+
+        def stop(self):
+            pass
+
+    fake = types.SimpleNamespace(start=lambda: FakePlaywright())
+    monkeypatch.setattr(connect_mod, "_import_playwright", lambda: (lambda: fake))
+    with pytest.raises(BrowserUnavailable):
+        connect_mod.connect(None)

@@ -1,0 +1,99 @@
+# Raiffeisenbank (online.raiffeisen.ru) — read-only profile, written from an
+# anonymised DOM snapshot on 2026-10-28. NOT checked against a live cabinet
+# yet: status: unverified.
+#
+# Two pages: the home page holds the product balances, /history/common holds
+# the operations. The history is NOT an endless list and it is NOT scrolled:
+# it shows 10 operations per page, the whole list is replaced when the
+# pagination arrow is pressed, and the URL never changes. That is what the
+# `pages` block describes.
+#
+# History markup (anonymised):
+#
+#   li.transaction-group-list__item            one day
+#     h5.transaction-group-list__item__title   "24 октября, суббота"
+#     ul.transaction-list
+#       li.transaction-list__item              one operation
+#         p.transaction-list__item-title
+#         transaction-list-amount
+#           div.transaction-list-amount
+#             div                                amount (income: ..._success)
+#             div.transaction-list-amount__cashback
+#
+# A day can be split across two pages: the same header appears on both.
+# Pagination:
+#
+#   nav.pagination > div.pagination__pages
+#     button.pagination__item_arrow (disabled)   left arrow
+#     button.pagination__item_active             the current page number
+#     button.pagination__item                    another page
+#     button.pagination__item_arrow              right arrow ("next page")
+#
+# On the last page the right arrow carries `disabled` — the list's own
+# definitive end of history.
+#
+# `pages.next_selector` names the right arrow only (`:last-child` of the
+# pages container). The driver presses it and nothing else: an arrow that is
+# missing or matches more than one element is never clicked, a disabled one
+# ends the run as complete, and the current page number
+# (`pages.active_selector`) must move to the next number together with a
+# fresh batch of rows. Every page followed by another one must hold exactly
+# page_size = 10 operations; a shorter intermediate page or a newer page
+# above an older one makes the run incomplete (exit code 5), so it can never
+# overwrite a fuller snapshot. No statement is downloaded and no request of
+# our own is sent.
+#
+# Raiffeisen shows currencies as ₽, $ and ¥. `parse_money` maps ¥ to JPY, but
+# in this cabinet ¥ is the yuan (CNY): the currency of such an amount is
+# reported as JPY. That is a known limitation of the money parser, not fixed
+# here; check `amount.currency` before summing yuan operations.
+bank: raif
+status: unverified
+notes: "Written from an anonymised DOM snapshot on 2026-10-28 and checked structurally only: the home product cards (product name with the account number stripped, amount, currency) and the /history/common list, where a day groups its operations and the list is split into numbered pages of 10 with a 'next page' arrow (the URL never changes). No live cabinet run has been made yet — selectors may still need a fix, so the status is unverified. The only click is that arrow (pages.next_selector); it is never pressed when it does not resolve to exactly one element, a disabled arrow ends the history as complete, and a short intermediate page or an out-of-order page makes the run incomplete. Amounts are reported with the currency printed on the page; ¥ is reported as JPY although at Raiffeisen it is the yuan (CNY) — a known parse_money limitation not changed in this profile."
+url: "https://online.raiffeisen.ru/"
+wait_for: ".home-product-list-item"
+timezone: Europe/Moscow
+
+balances:
+  - row: ".home-product-list-item"
+    fields:
+      # "Текущий счёт 40817810000000000000" -> "Текущий счёт"; a name without
+      # a trailing run of 10+ digits ("Вклад «Пример»") stays whole.
+      product:
+        selector: ".home-product-list-item__text-title"
+        regex: '^(.*?)(?:\s*\d{10,})?\s*$'
+        group: 1
+      amount:
+        selector: ".home-product-list-item__text-amount amount"
+
+transactions:
+  - url: "https://online.raiffeisen.ru/history/common"
+    wait_for: ".transaction-list__item"
+    # One day, split across pages when needed: the same header then repeats.
+    row: ".transaction-group-list__item"
+    fields:
+      date:
+        selector: ".transaction-group-list__item__title"
+        # "24 октября, суббота" -> 2026-10-24 (the weekday is ignored).
+        parse: ru_date
+    items:
+      row: ".transaction-list__item"
+      fields:
+        title:
+          selector: ".transaction-list__item-title"
+        # The first div is the signed amount ("−900 ₽", income "+13 000 ₽").
+        amount:
+          selector: ".transaction-list-amount > div:first-child"
+        # Most operations show no cashback at all: an empty div must stay silent.
+        cashback:
+          selector: ".transaction-list-amount__cashback"
+          optional: true
+    # 10 operations per page, the whole list is replaced, the URL is unchanged.
+    pages:
+      next_selector: "nav.pagination .pagination__pages > button.pagination__item_arrow:last-child"
+      active_selector: "nav.pagination button.pagination__item_active"
+      page_size: 10
+      settle_ms: 800
+      wait_ms: 15000
+      max_pages: 400
+      stop_before_date: "2026-01-01"

@@ -2,18 +2,21 @@
 
 **EN (short):** Read your own bank cabinet in a browser you already logged into. DOM extraction
 over CDP: no login automation, no passwords, no SMS codes, no clicks on "download statement",
-"pay" or "transfer". There are only two narrow, opt-in write actions: `--enter-code` answers the
+"pay" or "transfer". There are only three narrow, opt-in write actions: `--enter-code` answers the
 cabinet's static "secret code" prompt with a code read from a 0600 file, and a profile may name the
 list's own "load more" button (`scroll.load_more_text`) together with its list container
 (`scroll.load_more_scope`, required). The button must carry an allowlisted label and live inside the
 one container that holds the record's rows; it is pressed only when scrolling added no rows and
-exactly one such `<button>` is there, so that the list renders its next page. A same-label control
-outside the list is never clicked. Nothing else is clicked. Data stays local (git-ignored `data/`).
-Banks are added as YAML profiles; today `alfa` is verified against a live cabinet, including the
-load-more click and its scope (verified live on 2026-10-26), `tbank` (operations only, no clicks)
-is verified against the live cabinet on 2026-10-27 (expenses checked against the cabinet's day
-totals on the days that show one; income not checked numerically), and
-`example` is a synthetic profile used by the tests.
+exactly one such `<button>` is there, so that the list renders its next page. A list cut into
+numbered pages may instead name its own "next page" arrow (`pages.next_selector`); it is the only
+element clicked in that mode and only when it resolves to exactly one element, and a disabled arrow
+ends the history. A same-label control outside the list is never clicked. Nothing else is clicked.
+Data stays local (git-ignored `data/`). Banks are added as YAML profiles; today `alfa` is verified
+against a live cabinet, including the load-more click and its scope (verified live on 2026-10-26),
+`tbank` (operations only, no clicks) is verified against the live cabinet on 2026-10-27 (expenses
+checked against the cabinet's day totals on the days that show one; income not checked
+numerically), `raif` is written from an anonymised snapshot on 2026-10-28 and is still
+`unverified`, and `example` is a synthetic profile used by the tests.
 
 ---
 
@@ -36,12 +39,15 @@ totals on the days that show one; income not checked numerically), and
 4. Результат — JSON + CSV в `data/` (в git не попадают).
 
 Скрипт почти не нажимает кнопки кабинета: только `goto`, ожидание элемента, чтение текста и
-прокрутка уже отрисованного списка. Кликает он ровно в двух узких случаях: необязательный
-`--enter-code` отвечает на экран постоянного «Секретного кода» (см. ниже), а кнопка
+прокрутка уже отрисованного списка. Кликает он ровно в трёх узких случаях: необязательный
+`--enter-code` отвечает на экран постоянного «Секретного кода» (см. ниже); кнопка
 «Показать ещё» нажимается, только если её полный текст совпадает с `scroll.load_more_text`
 профиля, лежит в контейнере `scroll.load_more_scope` (обязателен) и она там ровно одна (она лишь
-дописывает строки списка; см. «Прокрутка»). Кнопка с той же подписью вне списка не нажимается.
-Оба случая включаются явно — флагом или строкой в профиле — и не трогают никакие другие кнопки.
+дописывает строки списка; см. «Прокрутка»); стрелка «дальше» постраничной истории нажимается,
+только если селектор `pages.next_selector` профиля находит ровно один элемент (она лишь
+переключает страницу списка; см. «Постраничная история»). Кнопка с той же подписью вне списка не
+нажимается. Все три случая включаются явно — флагом или строкой в профиле — и не трогают никакие
+другие кнопки.
 
 ## Установка и запуск
 
@@ -79,11 +85,12 @@ bank-collector --bank alfa
 
 Выходные файлы: `data/<bank>.json`, `data/<bank>-balances.csv` и `data/<bank>-transactions.csv`.
 Коды возврата: `0` — успех, `2` — браузер недоступен, `3` — профиль невалиден/не найден,
-`4` — ничего не извлечено (в отчёте будет `warnings`), `5` — история неполная: прокрутка не
-дошла до `stop_before_date` (или упёрлась в `max_rounds`). Код `5` — не успех, даже если отчёт
-записан. Если в `data/<bank>.json` уже лежит более длинная история, а новый запуск не доказал
-полноту (прокрутка не дошла, `--no-scroll` поверх прокрученного файла или ничего не извлечено),
-старый файл не трогается, а новый отчёт пишется в `data/<bank>.partial.json`.
+`4` — ничего не извлечено (в отчёте будет `warnings`), `5` — история неполная: прокрутка или
+постраничный обход не дошли до `stop_before_date` (или упёрлись в `max_rounds`/`max_pages`).
+Код `5` — не успех, даже если отчёт записан. Если в `data/<bank>.json` уже лежит более длинная
+история, а новый запуск не доказал полноту (список не дошёл до конца, `--no-scroll` поверх
+прокрученного файла или ничего не извлечено), старый файл не трогается, а новый отчёт пишется в
+`data/<bank>.partial.json`.
 
 ## Поддерживаемые банки
 
@@ -92,6 +99,7 @@ bank-collector --bank alfa
 | `example` | verified (синтетика) | остатки, операции | — (фикстура в тестах) |
 | `alfa` | **verified, 2026-10-24** | остатки по продуктам с главной, операции с `/history/` | да, живой кабинет в desktop Chrome |
 | `tbank` | **verified, 2026-10-27** | операции с `/mybank/operations/` (лента с заголовками дней, виртуализированный список) | да, живой кабинет: прогон выпускаемого кода (4bb5b03): 324 операции с 2025-12-31 за 188 с; каждый день сверяется с итогом расходов кабинета прямо при сборе (коротких дней нет); при ручной перепроверке 81 из 86 дней с итогом совпали точно, остальные 5 — ровно на одну операцию, которую банк сам не включает в итог; доход численно не сверялся; без кликов |
+| `raif` | unverified, 2026-10-28 | остатки по продуктам с главной, операции с `/history/common` (постраничный список: 10 операций на страницу, стрелка «дальше») | нет: профиль написан по обезличенному снапшоту 2026-10-28, живой запуск ещё впереди |
 
 Что именно читает `tbank`: на `https://www.tbank.ru/mybank/operations/` — лента операций, где
 заголовок дня и операции лежат соседними `<li>` одного `<ul>`; дата берётся у заголовка
@@ -157,6 +165,19 @@ bank-collector --bank alfa
 карточек продуктов, поэтому в отчёте только то, что видно по каждому продукту, без самодельных
 итогов.
 
+Что именно читает `raif`: на `online.raiffeisen.ru/` — карточки продуктов с названием и суммой
+(хвост из 10+ цифр — номер счёта — из названия вырезается), на `/history/common` — операции,
+сгруппированные по дням (дата берётся у заголовка дня, `parse: ru_date`; день может быть разбит
+между двумя страницами, и заголовок тогда повторяется). История **не прокручивается**: она
+разбита на страницы по 10 операций, стрелка «дальше» заменяет весь список, а URL не меняется —
+это режим `pages` (см. «Постраничная история»). На последней странице стрелка `disabled`, и это
+определённый конец истории: прогон считается полным, даже если самая старая операция новее
+`stop_before_date`. Профиль помечен `unverified`: селекторы собраны по обезличенному снапшоту
+2026-10-28, но на живом кабинете ещё не проверялись. Валюта берётся из строки; **¥
+Райффайзен пишет для юаня, а `parse_money` считает ¥ японской иеной (JPY)** — известное
+ограничение разбора денег, в этом изменении не исправлялось: перед подсчётом юаневых операций
+сверяйте `amount.currency`.
+
 «unverified» значит ровно то, что написано: профиль не проверяли на реальном кабинете, и он,
 скорее всего, не заработает без правки селекторов. Промежуточного статуса нет: `draft` убран,
 профиль либо проверен на живой странице, либо нет. Мы не выдаём непроверенное за рабочее.
@@ -203,8 +224,9 @@ bank-collector --bank alfa --cdp-url ... --enter-code
   оставалось 2 попытки) — считайте это «проверено по разметке, не по результату».
 
 `--enter-code` — единственное место, где скрипт вводит данные (`fill`). `click` есть только в
-`bank_collector/unlock.py` (кнопка «Вперёд» на экране кода) и в одном узком месте
-`bank_collector/collect.py` — кнопка «Показать ещё» (см. «Прокрутка»); всё остальное — чтение.
+`bank_collector/unlock.py` (кнопка «Вперёд» на экране кода) и в `bank_collector/collect.py` —
+кнопка «Показать ещё» (см. «Прокрутка») и стрелка «дальше» постраничной истории (см.
+«Постраничная история»); всё остальное — чтение.
 
 ## Импорт выписки
 
@@ -354,9 +376,34 @@ bank-collector --bank alfa --import-statement ~/Downloads/statement.csv --out da
   `complete` принудительно становится `false` (код `5`), чтобы не перезаписать более полный
   снапшот. `scroll.max_clicks` (по умолчанию 100) ограничивает число таких кликов; каждый клик
   считается раундом и расходует `scroll.max_rounds`. Другие кнопки («Скачать выписку»,
-  «Оплатить», «Перевести») не нажимаются никогда, страницы перечисления не переключаются.
+  «Оплатить», «Перевести») не нажимаются никогда; листать постраничное перечисление умеет только
+  стрелка режима `pages` (см. ниже).
   **Клик и скоуп проверены на живом кабинете 26.10.2026**: один клик дописал 40 операций назад
   до 2025-11-01, прокрутка остановилась по `stop: date`, запуск вернул `complete: true`.
+- **Постраничная история — режим `pages`.** Некоторые кабинеты (так делает Райффайзен, профиль
+  `raif`) не догружают список прокруткой, а показывают по 10 операций на страницу и листают его
+  стрелкой «дальше»: содержимое списка заменяется целиком, URL не меняется. Профиль описывает
+  это блоком `pages`: `pages.next_selector` — **единственный** элемент, который нажимает драйвер
+  (правая стрелка), `pages.active_selector` — элемент, в тексте которого стоит номер текущей
+  страницы. Селектор стрелки обязан найти **ровно один** элемент; ноль или несколько — клика нет,
+  предупреждение `next-page selector '…' matched N elements, none clicked`, `stop: error` (код
+  `5`). Стрелка с атрибутом `disabled` (или `aria-disabled="true"`) — это собственный конец
+  истории кабинета: обход завершается с `stop: end`, и прогон считается **полным** даже если
+  самая старая операция новее `stop_before_date`. Перед кликом номер страницы читается из
+  `pages.active_selector`; это должен быть ровно один элемент с целым числом в тексте, иначе
+  клика нет и `stop: error`. После клика драйвер ждёт (до `pages.wait_ms`), пока номер станет
+  ровно на единицу больше и отрисуется хотя бы одна строка операции; не дождался — предупреждение
+  `page did not advance past N`, `stop: error`. Страницы не пересекаются, поэтому все их строки
+  сохраняются как есть, без дедупликации между страницами: два одинаковых кофе на двух страницах —
+  две операции. Если новая страница повторяет предыдущую (номер сменился, а строки те же) — это
+  ошибка, клика дальше нет. Каждая страница, за которой была ещё одна, обязана содержать ровно
+  `pages.page_size` операций (последняя может быть короче): иначе предупреждение `page N showed K
+  operations, expected P` и `complete: false`. Даты идут по убыванию: самая новая дата страницы N
+  не может быть новее самой старой даты страницы N−1 — иначе предупреждение и `complete: false`.
+  В блоке `scroll` отчёта такой прогон пишет `mode: "pages"`, `pages` (сколько страниц прочитано),
+  `clicks` и `stop: date | end | limit | error`; `max_pages` (по умолчанию 300) — потолок страниц,
+  его достижение даёт `stop: limit`, предупреждение и код `5`. Блоки `pages` и `scroll` вместе
+  запрещены: это два способа читать один и тот же список.
 - **Как отключить прокрутку**: флаг `--no-scroll` (только первый экран, как раньше) или убрать
   блок `scroll:` из профиля банка. Настройки прокрутки — в профиле: `scroll.max_rounds` (шагов,
   по умолчанию 50), `scroll.step_px` (пикселей за шаг, 1500), `scroll.settle_ms` (пауза после
@@ -368,7 +415,8 @@ bank-collector --bank alfa --import-statement ~/Downloads/statement.csv --out da
 - **Неполная история не выдаётся за полную**: если список перестал расти раньше
   `stop_before_date`, в `warnings` будет «history reaches back only to …», а в блоке `scroll`
   отчёта — `oldest_date`, самая старая собранная дата, `clicks`, сколько раз нажималась кнопка
-  догрузки, и `complete: true|false`; запуск с неполной историей завершается кодом `5`. Две
+  догрузки или стрелка «дальше», и `complete: true|false`; запуск с неполной историей
+  завершается кодом `5`. Две
   одинаковые операции за один день (два кофе по 250 ₽) остаются двумя строками, только если хотя
   бы в одном проходе они отрисованы вместе; виртуализированный список, который показывает их по
   одной, сольёт вторую с первой — известное ограничение.

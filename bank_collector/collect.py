@@ -1,13 +1,20 @@
 """Generic, read-only collection driver.
 
 The driver only ever *reads* an already rendered DOM. It never types, never
-submits a form and never touches a downloading button. Its one write is an
-optional, narrowly scoped click on the list's own "load more" button (see
-``scroll.load_more_text`` below): it is made only when scrolling added no new
-rows, the ``scroll.load_more_scope`` selector names exactly one list container
-that holds rows of the record, and exactly one button inside that container
-carries exactly the configured text — it only asks the list to render its next
-page.
+submits a form and never touches a downloading button. Its two kinds of write
+are optional, narrowly scoped clicks on the history list itself:
+
+* the list's own "load more" button (see ``scroll.load_more_text`` below): it
+  is made only when scrolling added no new rows, the
+  ``scroll.load_more_scope`` selector names exactly one list container that
+  holds rows of the record, and exactly one button inside that container
+  carries exactly the configured text — it only asks the list to render its
+  next page;
+* the history's own "next page" arrow named by ``pages.next_selector`` (see
+  ``_paginate_section`` below): the list is cut into numbered pages, the
+  content is replaced on every page and the URL never changes. The arrow is
+  the only element clicked in that mode, and only when it resolves to exactly
+  one element; a disabled arrow is the definitive end of the history.
 
 The driver talks to a tiny protocol so that it can be tested without a
 browser (see ``tests/fake_page.py``) while still driving real Playwright
@@ -28,7 +35,8 @@ An *element* must provide
     ``text_content()``             -- the visible text of the element
     ``get_attribute(name)``        -- an attribute value or ``None``
     ``click()``                    -- optional, press the element (used only
-                                      for the one "load more" button)
+                                      for the one "load more" button and the
+                                      one "next page" arrow)
 
 Playwright's ``Page`` / ``ElementHandle`` satisfy this protocol as-is.
 
@@ -63,6 +71,16 @@ reached or the round limit is hit. When scrolling a round added no new rows
 and the record names a ``load_more_text``, the driver may press the single
 button with exactly that text inside the one container named by
 ``load_more_scope``: the click only asks the list to render its next page.
+
+A record may carry ``pages`` instead of ``scroll``: the history is split into
+numbered pages, the list replaces its content on every page and the URL never
+changes. The driver reads the first page with the ordinary pass and then, while
+the date limit is not reached, presses the single element named by
+``pages.next_selector`` and reads the page that replaced the previous one. The
+current page number is read from ``pages.active_selector`` before the click
+and must move to the next number afterwards; a disabled arrow is the list's
+definitive end. The pages are disjoint, so their rows are appended as they
+are, without cross-page dedup.
 """
 
 import re
@@ -1096,6 +1114,12 @@ def _oldest_date(rows):
     return min(dates) if dates else None
 
 
+def _newest_date(rows):
+    """The newest ``YYYY-MM-DD`` date among *rows*, or ``None``."""
+    dates = [date for date in (_row_date(row) for row in rows) if date]
+    return max(dates) if dates else None
+
+
 def _reached_date(rows, stop_before):
     """True when a row is dated strictly before *stop_before* (a ``YYYY-MM-DD``).
 
@@ -1469,16 +1493,267 @@ def _scroll_section(
     return rows, info
 
 
+#: How often the driver looks at the page number after the "next page" click.
+_PAGE_POLL_MS = 250
+
+
+def _element_disabled(element):
+    """True when a control is disabled: ``disabled`` or ``aria-disabled="true"``.
+
+    A disabled "next page" arrow is the list's own way of saying that the
+    history ends here — it is never pressed.
+    """
+    try:
+        if element.get_attribute("disabled") is not None:
+            return True
+        aria = element.get_attribute("aria-disabled")
+    except Exception:  # pragma: no cover - a re-render can kill a handle
+        return False
+    return _collapsed(aria or "").casefold() == "true"
+
+
+def _active_page_number(page, selector):
+    """The current page number, or ``None`` when it cannot be read.
+
+    Exactly one element must match *selector* and its whole text must be an
+    integer. More or fewer matches, or any other text, give ``None``: the
+    driver then never clicks, because it cannot tell which page it is on.
+    """
+    try:
+        matches = page.query_all(selector)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if len(matches) != 1:
+        return None
+    try:
+        text = _collapsed(matches[0].text_content())
+    except Exception:  # pragma: no cover - a re-render can kill a handle
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _active_page_message(page, selector):
+    """Say why the current page number could not be read."""
+    try:
+        matches = page.query_all(selector)
+    except Exception as exc:
+        return "active-page selector %r failed (%s)" % (selector, exc)
+    if len(matches) != 1:
+        return (
+            "active-page selector %r matched %d elements, not one page number"
+            % (selector, len(matches))
+        )
+    try:
+        text = _collapsed(matches[0].text_content())
+    except Exception as exc:  # pragma: no cover - a re-render can kill a handle
+        return "reading %r failed (%s)" % (selector, exc)
+    return "active-page selector %r holds %r, not a page number" % (selector, text)
+
+
+def _pages_limit_warning(warnings, section_name, pages, rows):
+    """Report that the pagination hit its page limit."""
+    warnings.append(
+        "%s: page limit reached after %d pages (%d rows, history may be incomplete)"
+        % (section_name, pages, len(rows))
+    )
+
+
+def _row_key_counts(rows):
+    """The multiset of operation keys of one page."""
+    return Counter(_row_key(row) for row in rows)
+
+
+def _rows_signature(page, row_selector):
+    """The texts of the rendered rows, as one tuple (empty when none or unreadable).
+
+    A cheap fingerprint of the list: it tells the old page from the new one
+    while the cabinet is still swapping the content in.
+    """
+    try:
+        return tuple(_collapsed(row.text_content()) for row in page.query_all(row_selector))
+    except Exception:  # pragma: no cover - a re-render can kill a handle
+        return ()
+
+
+def _paginate_section(
+    page, record_def, section_name, warnings, rows, pages_def,
+    timeout_ms=DEFAULT_TIMEOUT_MS, now=None,
+):
+    """Walk a history split into numbered pages and append their rows.
+
+    The first page is already read by the caller; this function presses the
+    list's own "next page" arrow (``pages.next_selector``) and reads every
+    page that replaces the previous one. The arrow is the only element ever
+    clicked in this mode. It must resolve to exactly one element; an arrow
+    carrying ``disabled`` (or ``aria-disabled="true"``) ends the history. The
+    current page number is read from ``pages.active_selector`` before the
+    click and must move to the next integer afterwards, together with at
+    least one rendered row.
+
+    The pages are disjoint, so all their rows are kept without cross-page
+    dedup: two equal coffees on two pages are two operations. A page whose
+    rows are the same multiset as the page before did not switch and is an
+    error. Every page followed by another one must show exactly
+    ``pages.page_size`` operations (the last page may be shorter), and the
+    newest date of a page must not be newer than the oldest date of the page
+    before — otherwise the run is reported incomplete.
+
+    Returns ``(rows, info)`` where *info* mirrors the scroll block: ``mode``
+    (``"pages"``), ``pages`` (how many pages were read), ``clicks``, ``rows``,
+    ``stop``, ``oldest_date``, ``headerless_rows`` (always 0 here) and
+    ``complete``.
+    """
+    next_selector = pages_def["next_selector"]
+    active_selector = pages_def["active_selector"]
+    page_size = pages_def.get("page_size")
+    settle_ms = pages_def["settle_ms"]
+    wait_ms = pages_def["wait_ms"]
+    max_pages = pages_def["max_pages"]
+    stop_before = pages_def.get("stop_before_date")
+
+    pages_read = 1
+    clicks = 0
+    short_page = False
+    stop = "error"
+    previous_rows = list(rows)
+    polls = max(1, (wait_ms + _PAGE_POLL_MS - 1) // _PAGE_POLL_MS)
+
+    while True:
+        if _reached_date(rows, stop_before):
+            stop = "date"
+            break
+
+        try:
+            arrows = page.query_all(next_selector)
+        except Exception as exc:  # pragma: no cover - defensive
+            warnings.append(
+                "%s: next-page selector %r failed (%s)" % (section_name, next_selector, exc)
+            )
+            stop = "error"
+            break
+        if len(arrows) != 1:
+            warnings.append(
+                "%s: next-page selector %r matched %d elements, none clicked"
+                % (section_name, next_selector, len(arrows))
+            )
+            stop = "error"
+            break
+        arrow = arrows[0]
+
+        if _element_disabled(arrow):
+            stop = "end"
+            break
+
+        if pages_read >= max_pages:
+            _pages_limit_warning(warnings, section_name, pages_read, rows)
+            stop = "limit"
+            break
+
+        previous_number = _active_page_number(page, active_selector)
+        if previous_number is None:
+            warnings.append(
+                "%s: %s" % (section_name, _active_page_message(page, active_selector))
+            )
+            stop = "error"
+            break
+
+        before = _rows_signature(page, record_def["row"])
+        try:
+            arrow.click()
+        except Exception as exc:
+            warnings.append("%s: next-page click failed (%s)" % (section_name, exc))
+            stop = "error"
+            break
+        clicks += 1
+
+        # The cabinet replaces the list in place, and the page number may move
+        # before the new rows arrive: wait until the number moved on AND the
+        # rendered rows are there and differ from the rows before the click.
+        advanced = False
+        for attempt in range(polls):
+            if _active_page_number(page, active_selector) == previous_number + 1:
+                current = _rows_signature(page, record_def["row"])
+                if current and current != before:
+                    advanced = True
+                    break
+            if attempt + 1 < polls:
+                time.sleep(_PAGE_POLL_MS / 1000.0)
+        if not advanced:
+            warnings.append(
+                "%s: page did not advance past %d" % (section_name, previous_number)
+            )
+            stop = "error"
+            break
+
+        if settle_ms > 0:
+            time.sleep(settle_ms / 1000.0)
+
+        next_rows = _extract_rows_stable(
+            page, record_def, section_name, warnings, timeout_ms=timeout_ms, now=now
+        )
+        next_number = pages_read + 1
+
+        if _row_key_counts(next_rows) == _row_key_counts(previous_rows):
+            warnings.append(
+                "%s: page %d content did not change after the click "
+                "(the list did not switch pages)" % (section_name, next_number)
+            )
+            stop = "error"
+            break
+
+        # The page before was followed by another one, so it must have been
+        # full. The final page (a disabled arrow) may be shorter.
+        if page_size is not None and len(previous_rows) != page_size:
+            warnings.append(
+                "%s: page %d showed %d operations, expected %d"
+                % (section_name, pages_read, len(previous_rows), page_size)
+            )
+            short_page = True
+
+        newest = _newest_date(next_rows)
+        oldest_before = _oldest_date(previous_rows)
+        if newest is not None and oldest_before is not None and newest > oldest_before:
+            warnings.append(
+                "%s: page %d starts at %s, newer than page %d ends at %s "
+                "(history may be incomplete)"
+                % (section_name, next_number, newest, pages_read, oldest_before)
+            )
+            short_page = True
+
+        rows.extend(next_rows)
+        previous_rows = list(next_rows)
+        pages_read = next_number
+
+    info = {
+        "mode": "pages",
+        "pages": pages_read,
+        "clicks": clicks,
+        "rows": len(rows),
+        "stop": stop,
+        "oldest_date": _oldest_date(rows),
+        "headerless_rows": 0,
+    }
+    _judge_completeness(warnings, section_name, info, stop_before)
+    # A short intermediate page or a newer page above an older one can only
+    # turn a complete run into an incomplete one, never the other way round.
+    if short_page:
+        info["complete"] = False
+    return rows, info
+
+
 def _judge_completeness(warnings, section_name, info, stop_before):
     """Set ``info["complete"]`` and say so when the history is short.
 
     The history is complete when an older row than *stop_before* was seen
-    (``date``) or when the list stopped growing at a row of that day or
-    older. A list that stopped growing too early (``empty``), a broken
-    scroll (``error``) or a page that cannot scroll may simply not have
+    (``date``), when the list's own "next page" arrow is disabled (``end``:
+    a definitive end of history, whatever date the oldest row has) or when
+    the scrolled list stopped growing at a row of that day or older. A list
+    that stopped growing too early (``empty``), a broken scroll or page
+    switch (``error``) or a page that cannot scroll may simply not have
     rendered the older rows yet; without this flag such a run would look
     like a complete history. Without *stop_before* only a list that stopped
-    growing counts as complete. The round limit has a warning of its own.
+    growing counts as complete. The round and page limits have a warning of
+    their own.
 
     Rows that could not be dated at all (``headerless_rows``) were silently
     dropped from the output, so a run with any of them is never complete:
@@ -1486,7 +1761,7 @@ def _judge_completeness(warnings, section_name, info, stop_before):
     """
     stop = info["stop"]
     oldest = info.get("oldest_date")
-    if stop == "date":
+    if stop in ("date", "end"):
         complete = True
     elif stop == "limit":
         complete = False
@@ -1530,13 +1805,17 @@ def extract_section(
 
     A record may hold ``scroll``: the driver then scrolls the rendered list
     (read-only) and keeps the rows that appear while the list is scrolled.
-    *scroll_info* — when a dictionary is given — receives a small report
-    about that run.
+    A record may hold ``pages`` instead: the list is cut into numbered pages
+    and the driver presses the list's own "next page" arrow, reading every
+    page that replaces the previous one. *scroll_info* — when a dictionary is
+    given — receives a small report about that run (the same ``scroll`` block
+    of the report, with ``mode: "pages"`` for a paginated one).
     """
     visit_record(page, record_def, warnings, visited=visited, timeout_ms=timeout_ms)
 
     headerless = {"headerless_rows": 0}
     scroll_def = record_def.get("scroll")
+    pages_def = record_def.get("pages")
     # The operation rows (with their dates) travel from one pass into the
     # next, so an operation whose header already left a virtualised DOM can
     # still be dated by its overlap with the previous rendered window.
@@ -1573,6 +1852,14 @@ def extract_section(
         if scroll_info is not None:
             scroll_info.update(info)
 
+    if pages_def:
+        results, info = _paginate_section(
+            page, record_def, section_name, warnings, results, pages_def,
+            timeout_ms=timeout_ms, now=now,
+        )
+        if scroll_info is not None:
+            scroll_info.update(info)
+
     return results
 
 
@@ -1582,16 +1869,21 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     Returns a dict with the keys ``bank``, ``status``, ``source_url``,
     ``source_urls``, ``fetched_at``, ``balances``, ``transactions`` and
     ``warnings``. ``source_urls`` lists every page that was opened, in order.
-    When a record asked for scrolling, the dict also holds a ``scroll`` key
-    (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
-    "no-scroll", "oldest_date": "YYYY-MM-DD"|None, "clicks": K,
-    "load_more_missing": E, "headerless_rows": H, "complete": bool}``) that
-    tells how the scroll ended, how far back it reached, how many load-more
-    clicks it made, how many empty rounds found no matching button in the
-    list container, how many operation rows could not be dated at all and
-    were therefore skipped (``headerless_rows``, a virtualised flat feed with
-    no reliable overlap between rounds) and whether that is the whole history
-    the profile asked for.
+    When a record asked for scrolling or numbered pages, the dict also holds
+    a ``scroll`` key that tells how the run ended, how far back it reached and
+    whether that is the whole history the profile asked for. A scrolled run
+    reports ``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|
+    "error"|"no-scroll", "oldest_date": "YYYY-MM-DD"|None, "clicks": K,
+    "load_more_missing": E, "headerless_rows": H, "complete": bool}``: how
+    many load-more clicks it made, how many empty rounds found no matching
+    button in the list container, how many operation rows could not be dated
+    at all and were therefore skipped (``headerless_rows``, a virtualised flat
+    feed with no reliable overlap between rounds). A paginated run reports
+    ``{"mode": "pages", "pages": P, "clicks": K, "rows": M, "stop": "date"|
+    "end"|"limit"|"error", "oldest_date": ..., "headerless_rows": 0,
+    "complete": bool}``: how many pages were read, how many times the "next
+    page" arrow was pressed and where the walk stopped (``end`` is a disabled
+    arrow — the list's definitive end of history).
 
     *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
     relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field

@@ -37,8 +37,8 @@ without the ``tzdata`` package) every name is accepted and the run resolves
 dates in UTC with a warning.
 
 A record (one entry of ``balances`` or ``transactions``) accepts the keys
-``row``, ``fields``, ``url``, ``wait_for``, ``items``, ``header`` and
-``scroll``:
+``row``, ``fields``, ``url``, ``wait_for``, ``items``, ``header``, ``scroll``
+and ``pages``:
 
 ``row``
     CSS selector of the repeating container. Optional — without it the whole
@@ -112,6 +112,35 @@ A record (one entry of ``balances`` or ``transactions``) accepts the keys
     nothing is clicked and the run stops with an error.  The button is then
     searched only inside that container, so a same-label control of another
     widget (an offers block, a link) can never be pressed.
+``pages``
+    Optional: a history list cut into numbered pages that the cabinet
+    replaces in place — ten operations per page, a "next" arrow, the same URL
+    throughout.  It cannot be combined with ``scroll`` (two ways to read one
+    list) and, like ``scroll``, it needs a ``row``.  It describes the one
+    arrow the driver may press and the element that shows the current page::
+
+        pages:
+          next_selector: "nav.pagination .pagination__pages > button.pagination__item_arrow:last-child"
+                                      # REQUIRED: the one "next page" arrow; the ONLY click
+          active_selector: "nav.pagination button.pagination__item_active"
+                                      # REQUIRED: the element whose text is the current page number
+          page_size: 10               # optional: expected operations per full page, int >= 1
+          settle_ms: 800              # wait after the page changed, int >= 0, default 800
+          wait_ms: 15000              # how long the next page may take to render, int >= 1, default 15000
+          max_pages: 400              # hard cap on pages read, int >= 1, default 300
+          stop_before_date: "2026-01-01"  # optional YYYY-MM-DD: stop once a row dated strictly before it is seen
+
+    The driver never presses anything else in this mode.  An arrow that does
+    not resolve to exactly one element is not clicked and stops the run with
+    an error; an arrow carrying ``disabled`` (or ``aria-disabled="true"``) is
+    the list's definitive end of history.  The current page number must be
+    exactly one element whose whole text is an integer: the click is made
+    only when the page can be recognised before it and has moved to the next
+    number afterwards (``wait_ms``).  The rows of every page are kept as they
+    are: the pages are disjoint, so two equal coffees on two pages are two
+    operations.  A page that repeats the previous page's rows is an error.
+    ``page_size`` and the day order (a newer page above an older one would
+    mean a lost page) are checked and only ever turn ``complete`` to False.
 
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
@@ -208,7 +237,7 @@ _UNLOCK_KEYS = (
 )
 
 # The keys a record (one entry of ``balances``/``transactions``) may carry.
-_RECORD_KEYS = ("row", "fields", "url", "wait_for", "items", "header", "scroll")
+_RECORD_KEYS = ("row", "fields", "url", "wait_for", "items", "header", "scroll", "pages")
 
 # The keys the optional ``scroll`` block of a record may carry.  It says how
 # far and how long to scroll the rendered list, and names the one "load more"
@@ -261,6 +290,39 @@ _SCROLL_MINIMUMS = {
     "settle_ms": 0,
     "stop_after_empty_rounds": 1,
     "max_clicks": 1,
+}
+
+# The keys the optional ``pages`` block of a record may carry.  It describes
+# a history list cut into numbered pages: the one "next" arrow the driver may
+# press and the element that shows the current page number — never any other
+# click.
+_PAGES_KEYS = (
+    "next_selector",
+    "active_selector",
+    "page_size",
+    "settle_ms",
+    "wait_ms",
+    "max_pages",
+    "stop_before_date",
+)
+
+#: The values used when the profile does not say otherwise.
+_PAGES_DEFAULTS = {
+    "next_selector": None,
+    "active_selector": None,
+    "page_size": None,
+    "settle_ms": 800,
+    "wait_ms": 15000,
+    "max_pages": 300,
+    "stop_before_date": None,
+}
+
+#: The smallest value each numeric key may have.
+_PAGES_MINIMUMS = {
+    "page_size": 1,
+    "settle_ms": 0,
+    "wait_ms": 1,
+    "max_pages": 1,
 }
 
 #: The only date format the profile accepts (``stop_before_date``).
@@ -581,12 +643,74 @@ def _normalise_scroll(index, scroll, where):
     return result
 
 
-def _check_stop_date(index, value, where):
-    """Validate a ``YYYY-MM-DD`` date (and return it untouched)."""
+def _normalise_pages(index, pages, where):
+    """Validate the optional ``pages`` block of a record.
+
+    The block describes a history split into numbered pages: the list
+    replaces its content in place and the URL never changes.  It names the
+    one "next" arrow the driver may press (``next_selector``, the only click
+    of this mode) and the element that carries the current page number
+    (``active_selector``).  Every other key is a bound, not an action:
+    ``page_size`` says how many operations a full page should hold,
+    ``settle_ms``/``wait_ms`` how long the driver waits for the next page and
+    ``max_pages`` caps the run.  The block cannot be combined with
+    ``scroll`` — both describe one and the same list.
+    """
+    if not isinstance(pages, dict):
+        raise ProfileError("%s: record #%d: 'pages' must be a mapping" % (where, index))
+
+    unknown = sorted(set(pages) - set(_PAGES_KEYS))
+    if unknown:
+        raise ProfileError(
+            "%s: record #%d: 'pages' has unknown key(s) %s (allowed: %s)"
+            % (where, index, ", ".join(unknown), ", ".join(_PAGES_KEYS))
+        )
+
+    result = dict(_PAGES_DEFAULTS)
+
+    for key, minimum in _PAGES_MINIMUMS.items():
+        value = pages.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ProfileError(
+                "%s: record #%d: 'pages.%s' must be an integer" % (where, index, key)
+            )
+        if value < minimum:
+            raise ProfileError(
+                "%s: record #%d: 'pages.%s' must be >= %d (got %r)"
+                % (where, index, key, minimum, value)
+            )
+        result[key] = value
+
+    for key in ("next_selector", "active_selector"):
+        value = pages.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ProfileError(
+                "%s: record #%d: 'pages.%s' must be a non-empty CSS selector"
+                % (where, index, key)
+            )
+        result[key] = value.strip()
+
+    stop_before = pages.get("stop_before_date")
+    if stop_before is not None:
+        result["stop_before_date"] = _check_stop_date(
+            index, stop_before, where, key="pages.stop_before_date"
+        )
+
+    return result
+
+
+def _check_stop_date(index, value, where, key="scroll.stop_before_date"):
+    """Validate a ``YYYY-MM-DD`` date (and return it untouched).
+
+    *key* is the full dotted name of the option, so the error names the block
+    the date came from (``scroll`` or ``pages``).
+    """
     if not isinstance(value, str) or not _DATE_RE.match(value.strip()):
         raise ProfileError(
-            "%s: record #%d: 'scroll.stop_before_date' must be a YYYY-MM-DD date (got %r)"
-            % (where, index, value)
+            "%s: record #%d: %r must be a YYYY-MM-DD date (got %r)"
+            % (where, index, key, value)
         )
     text = value.strip()
     from datetime import date
@@ -595,8 +719,8 @@ def _check_stop_date(index, value, where):
         date(int(text[0:4]), int(text[5:7]), int(text[8:10]))
     except ValueError:
         raise ProfileError(
-            "%s: record #%d: 'scroll.stop_before_date' is not a real date (%r)"
-            % (where, index, value)
+            "%s: record #%d: %r is not a real date (%r)"
+            % (where, index, key, value)
         )
     return text
 
@@ -610,6 +734,7 @@ def _normalise_record(index, record, section, where):
     items = None
     header = None
     scroll = None
+    pages = None
 
     if "fields" in record:
         unknown = sorted(set(record) - set(_RECORD_KEYS))
@@ -626,6 +751,7 @@ def _normalise_record(index, record, section, where):
         items = record.get("items")
         header = record.get("header")
         scroll = record.get("scroll")
+        pages = record.get("pages")
     else:
         # The "flat" sugar form: the fields sit directly under the record. A
         # field may be named "url"/"wait_for" as long as its value is a
@@ -648,6 +774,10 @@ def _normalise_record(index, record, section, where):
             value = record["scroll"]
             if isinstance(value, dict) and "selector" not in value:
                 reserved.add("scroll")
+        if "pages" in record:
+            value = record["pages"]
+            if isinstance(value, dict) and "selector" not in value:
+                reserved.add("pages")
         fields = {}
         for key, value in record.items():
             if key == "row" or key in reserved:
@@ -658,6 +788,7 @@ def _normalise_record(index, record, section, where):
         items = record.get("items") if "items" in reserved else None
         header = record.get("header") if "header" in reserved else None
         scroll = record.get("scroll") if "scroll" in reserved else None
+        pages = record.get("pages") if "pages" in reserved else None
 
     if not fields:
         raise ProfileError("%s: record #%d has no fields" % (where, index))
@@ -712,6 +843,22 @@ def _normalise_record(index, record, section, where):
             )
         normalised_scroll = _normalise_scroll(index, scroll, where)
 
+    normalised_pages = None
+    if pages is not None:
+        if row is None:
+            raise ProfileError(
+                "%s: record #%d: 'pages' needs a 'row' — there must be rows to count"
+                % (where, index)
+            )
+        normalised_pages = _normalise_pages(index, pages, where)
+
+    if normalised_scroll is not None and normalised_pages is not None:
+        raise ProfileError(
+            "%s: record #%d: 'scroll' and 'pages' cannot be used together — scrolling a "
+            "list and switching its numbered pages are two ways to read the same history"
+            % (where, index)
+        )
+
     return {
         "row": row,
         "fields": fields,
@@ -720,6 +867,7 @@ def _normalise_record(index, record, section, where):
         "items": normalised_items,
         "header": normalised_header,
         "scroll": normalised_scroll,
+        "pages": normalised_pages,
     }
 
 

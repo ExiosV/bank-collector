@@ -45,11 +45,15 @@ merged into one output row.
 
 A record may carry ``header`` instead when the feed is *flat*: day headers
 and operations are siblings in one list. ``row`` then matches every row of
-the feed in document order; a row that contains ``header.selector`` is a
-header, its ``header.fields`` become the current header values, and every
-other row is an operation that inherits them. Operations rendered before the
-first header of a pass have no date and are skipped silently (they were
-normally read in an earlier round, while their header was still rendered).
+the feed; a row that contains ``header.selector`` is a header, its
+``header.fields`` become the current header values, and every other row is an
+operation that inherits them. Operations with no header above them in a pass
+have no date and are skipped silently (they were normally read in an earlier
+round, while their header was still rendered). A page that offers
+``snapshot_rows(spec)`` is read in ONE pass over there: every row comes back
+with its raw field text and its vertical position, so the driver dates each
+operation by the header nearest *above it on screen* (a virtualised feed may
+render its rows in an order that differs from what the reader sees).
 
 Finally a record may carry ``scroll``: the driver then scrolls the rendered
 list (read-only) and reads the rows that the cabinet appends while the list
@@ -372,6 +376,34 @@ def _apply_regex(text, spec, where, warnings):
         return None
 
 
+def _empty_field():
+    """A field that could not be read at all."""
+    return {"raw": None, "value": None, "currency": None, "money": False}
+
+
+def _process_text(text, spec, where, warnings, now=None):
+    """Turn the raw text of one field into its output field.
+
+    This is the second half of ``extract_record``: the regex/group step, the
+    money normalisation and the ``parse: ru_date`` step. It is shared with the
+    page-side snapshot path (``_records_from_snapshot``), so a field read from
+    a snapshot has exactly the shape of a field read element by element.
+    """
+    matched = _apply_regex(text, spec, where, warnings)
+    if matched is None:
+        return {"raw": text, "value": None, "currency": None, "money": False}
+
+    if spec.get("parse") == "ru_date":
+        iso = parse_ru_date(matched, now)
+        if iso is None:
+            warnings.append("%s: cannot parse ru_date from %r" % (where, matched))
+        return {"raw": text, "value": iso, "currency": None, "money": False}
+
+    normalised = normalise_value(matched)
+    normalised["raw"] = text
+    return normalised
+
+
 def extract_record(row, record_def, where_prefix, warnings, now=None):
     """Read the fields of one record out of *row*.
 
@@ -397,7 +429,7 @@ def extract_record(row, record_def, where_prefix, warnings, now=None):
         if not matches:
             if not optional:
                 warnings.append("%s: selector %r matched nothing" % (where, spec["selector"]))
-            fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+            fields[name] = _empty_field()
             continue
 
         element = matches[0]
@@ -413,31 +445,138 @@ def extract_record(row, record_def, where_prefix, warnings, now=None):
                 if text is None:
                     if not optional:
                         warnings.append("%s: attribute %r missing" % (where, attr))
-                    fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+                    fields[name] = _empty_field()
                     continue
             else:
                 text = element.text_content()
         except Exception as exc:
             warnings.append("%s: reading %r failed (%s)" % (where, spec.get("selector"), exc))
-            fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+            fields[name] = _empty_field()
             continue
 
-        matched = _apply_regex(text, spec, where, warnings)
-        if matched is None:
-            fields[name] = {"raw": text, "value": None, "currency": None, "money": False}
-            continue
-
-        if spec.get("parse") == "ru_date":
-            iso = parse_ru_date(matched, now)
-            if iso is None:
-                warnings.append("%s: cannot parse ru_date from %r" % (where, matched))
-            fields[name] = {"raw": text, "value": iso, "currency": None, "money": False}
-            continue
-
-        normalised = normalise_value(matched)
-        normalised["raw"] = text
-        fields[name] = normalised
+        fields[name] = _process_text(text, spec, where, warnings, now=now)
     return fields
+
+
+def _page_fields(fields):
+    """Only the parts of field specs the page itself needs.
+
+    ``regex``, ``group``, ``parse`` and ``optional`` stay in Python: the page
+    returns raw text, the driver turns it into the output field.
+    """
+    spec = {}
+    for name, field in fields.items():
+        entry = {"selector": field["selector"]}
+        attr = field.get("attr")
+        if attr:
+            entry["attr"] = attr
+        spec[name] = entry
+    return spec
+
+
+def _snapshot_spec(record_def, header_def):
+    """The selector spec of one page-side pass over a flat feed."""
+    return {
+        "row": record_def.get("row"),
+        "header_selector": header_def["selector"],
+        "header_fields": _page_fields(header_def["fields"]),
+        "fields": _page_fields(record_def["fields"]),
+    }
+
+
+def _snapshot_field(fields, name, spec, where, warnings, now=None):
+    """One output field from the snapshot entry of that field."""
+    optional = bool(spec.get("optional"))
+    entry = fields.get(name) or {}
+    if not entry.get("found"):
+        if not optional:
+            warnings.append("%s: selector %r matched nothing" % (where, spec["selector"]))
+        return _empty_field()
+
+    text = entry.get("text")
+    attr = spec.get("attr")
+    if attr and text is None:
+        if not optional:
+            warnings.append("%s: attribute %r missing" % (where, attr))
+        return _empty_field()
+    if text is None:
+        text = ""
+    return _process_text(text, spec, where, warnings, now=now)
+
+
+def _record_from_snapshot(fields, record_def, where_prefix, warnings, now=None):
+    """Turn the snapshot fields of one row into an output record."""
+    out = {}
+    for name, spec in record_def["fields"].items():
+        where = "%s.%s" % (where_prefix, name)
+        out[name] = _snapshot_field(fields, name, spec, where, warnings, now=now)
+    return out
+
+
+def _sort_key(position, item):
+    """Sort the rows of a snapshot by their place on screen, then by DOM order.
+
+    The top of a row is what tells where it really sits: a virtualised feed
+    may render its rows in an order that differs from what the reader sees.
+    A missing or non-numeric ``top`` falls back to the DOM position, so the
+    order of a page that cannot report geometry is unchanged.
+    """
+    top = item.get("top")
+    try:
+        top = float(top)
+    except (TypeError, ValueError):
+        top = float(position)
+    index = item.get("index")
+    if not isinstance(index, int) or isinstance(index, bool):
+        index = position
+    return (top, index)
+
+
+def _records_from_snapshot(snapshot, record_def, section_name, warnings, now=None, counter=None):
+    """Build the records of a flat feed from one page-side snapshot.
+
+    Every row is placed by ``(top, index)``, so a row is dated by the day
+    header that is *visually* nearest above it, not by the order the DOM
+    happens to render. A row before the first header in that order has no
+    date: it is skipped silently and counted in ``counter["headerless_rows"]``
+    exactly like the element-by-element pass does.
+    """
+    header_def = record_def["header"]
+    current_header = None
+    results = []
+
+    ordered = sorted(
+        enumerate(snapshot), key=lambda pair: _sort_key(pair[0], pair[1] or {})
+    )
+    for position, item in ordered:
+        if not isinstance(item, dict):
+            item = {}
+        index = item.get("index")
+        row_index = index if isinstance(index, int) and not isinstance(index, bool) else position
+        row_prefix = "%s[%d]" % (section_name, row_index)
+        fields = item.get("fields") or {}
+
+        if item.get("header"):
+            current_header = _record_from_snapshot(
+                fields, header_def, "%s.header" % row_prefix, warnings, now=now
+            )
+            continue
+        if current_header is None:
+            if counter is not None:
+                counter["headerless_rows"] = counter.get("headerless_rows", 0) + 1
+            continue
+
+        item_fields = _record_from_snapshot(fields, record_def, row_prefix, warnings, now=now)
+        merged = dict(current_header)
+        for name, value in item_fields.items():
+            if name in current_header:
+                warnings.append(
+                    "%s: field %r is defined both in the header and in the item"
+                    % (row_prefix, name)
+                )
+            merged[name] = value
+        results.append(merged)
+    return results
 
 
 def _same_url(left, right):
@@ -486,16 +625,31 @@ def _extract_rows(page, record_def, section_name, warnings, now=None, counter=No
     item wins when both define the same field.
 
     A record may hold ``header`` instead: the feed is flat, so ``row`` matches
-    both the day headers and the operations in document order. A header row
-    updates the current header values and is not emitted; an operation row
-    inherits them (the operation wins on a clash). An operation rendered
-    before the first header of this pass has no date: it is skipped silently
-    and counted in ``counter["headerless_rows"]`` — during scrolling it was
-    normally read in an earlier round, while its header was still rendered.
+    both the day headers and the operations. A header row updates the current
+    header values and is not emitted; an operation row inherits them (the
+    operation wins on a clash). An operation with no header visually above it
+    in this pass has no date: it is skipped silently and counted in
+    ``counter["headerless_rows"]`` — during scrolling it was normally read in
+    an earlier round, while its header was still rendered.
+
+    When the page offers ``snapshot_rows`` and the record has both a ``row``
+    and a ``header``, the whole feed is read in one page-side pass and the
+    rows are dated by the header that is nearest above them on screen. The
+    element-by-element pass below stays as the fallback for a page without
+    that method; records without ``header`` always use it.
     """
-    rows = page.query_all(record_def["row"]) if record_def.get("row") else [page]
     items_def = record_def.get("items")
     header_def = record_def.get("header")
+
+    if header_def and record_def.get("row"):
+        snapshot_rows = getattr(page, "snapshot_rows", None)
+        if snapshot_rows is not None:
+            snapshot = snapshot_rows(_snapshot_spec(record_def, header_def))
+            return _records_from_snapshot(
+                snapshot, record_def, section_name, warnings, now=now, counter=counter
+            )
+
+    rows = page.query_all(record_def["row"]) if record_def.get("row") else [page]
     results = []
 
     if header_def:

@@ -925,3 +925,89 @@ def test_a_leading_block_that_repeats_a_later_day_keeps_its_own_day():
         ("2026-10-23", "Магазин А (тест)"),
     ]
     assert result["scroll"]["headerless_rows"] == 0
+
+
+def test_an_optional_description_appearing_later_does_not_break_the_overlap():
+    """Executor round 3: a row re-rendered with its optional description changed
+    its key, broke the true overlap, and a coincidental match on a recurring pair
+    misdated the block. Optional fields are not part of the overlap key."""
+    ticket = ("Ж/д билет (тест)", "−1 978,5 ₽", "Ж/д билеты")
+    phone = ("Связь (тест)", "−320 ₽", "Мобильная связь")
+    window_one = _feed(
+        _header("24 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+        _header("23 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+    )
+    window_two = _feed(
+        _operation(*ticket),
+        _operation(*phone),
+        _header("23 октября"),
+        _operation(*ticket),
+        _operation(*phone, description="кэшбэк 3 ₽"),
+        _header("22 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    dated = [(row["date"]["value"], row["title"]["value"]) for row in result["transactions"]]
+    assert dated == [
+        ("2026-10-24", "Ж/д билет (тест)"),
+        ("2026-10-24", "Связь (тест)"),
+        ("2026-10-23", "Ж/д билет (тест)"),
+        ("2026-10-23", "Связь (тест)"),
+        ("2026-10-22", "Магазин А (тест)"),
+    ]
+    assert result["scroll"]["headerless_rows"] == 0
+
+
+def test_a_coincidental_overlap_that_disagrees_with_the_headers_is_rejected():
+    """When the real overlap is broken (here a title changed between renders), a
+    shorter suffix=prefix match on a recurring pair must not date the block by
+    another day: the day must agree with the headers, otherwise the rows are
+    skipped, counted, warned about and the run is incomplete."""
+    ticket = ("Ж/д билет (тест)", "−1 978,5 ₽", "Ж/д билеты")
+    phone = ("Связь (тест)", "−320 ₽", "Мобильная связь")
+    window_one = _feed(
+        _header("24 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+        _header("23 октября"),
+        _operation(*ticket),
+        _operation(*phone),
+    )
+    window_two = _feed(
+        _operation(*ticket),
+        _operation(*phone),
+        _header("23 октября"),
+        _operation(*ticket),
+        _operation("Связь, переименована (тест)", "−320 ₽", "Мобильная связь"),
+        _header("22 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    dated = [(row["date"]["value"], row["title"]["value"]) for row in result["transactions"]]
+    # The 24th's two rows were read in window one; window two's leading copies are
+    # not re-dated by the 23rd.
+    assert ("2026-10-23", "Ж/д билет (тест)") in dated
+    assert dated.count(("2026-10-23", "Ж/д билет (тест)")) == 1
+    assert ("2026-10-24", "Ж/д билет (тест)") in dated
+    assert result["scroll"]["headerless_rows"] >= 1
+    assert result["scroll"]["complete"] is False

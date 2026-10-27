@@ -581,10 +581,12 @@ def _content_key(row, record_def):
     defines one in both places.
     """
     header_names = set((record_def.get("header") or {}).get("fields") or ())
+    # Optional fields (a description, cashback text) may appear in a later render
+    # of the same row; a key that changes between two windows breaks the overlap.
     return tuple(
         _field_text(row, name)
-        for name in record_def.get("fields") or {}
-        if name not in header_names
+        for name, spec in (record_def.get("fields") or {}).items()
+        if name not in header_names and not (isinstance(spec, dict) and spec.get("optional"))
     )
 
 
@@ -627,32 +629,66 @@ def _header_key(header):
     return ("H", _row_date(header) or _field_text(header, "date") or repr(sorted(header)))
 
 
+def _expected_leading_header(current_rows, previous_rows):
+    """The day the leading block must belong to, according to the headers alone.
+
+    The leading block sits right above this window's first header. In the
+    previous window that place is right before the same header (when it was
+    already rendered there), else at the very bottom (the header is new).
+    Every entry carries the header that dates it (a header entry carries
+    itself), so the entry just above that place names the day.
+    """
+    first = next((row.get("key") for row in current_rows if (row.get("key") or ("",))[0] == "H"), None)
+    position = len(previous_rows)
+    if first is not None:
+        for index in range(len(previous_rows) - 1, -1, -1):
+            if previous_rows[index].get("key") == first:
+                position = index
+                break
+    if position == 0:
+        return None
+    return previous_rows[position - 1].get("header")
+
+
 def _align_leading(current_rows, previous_rows, leading_count):
     """Date the leading rows of a round by the overlap with the round before.
 
     Two consecutive windows of a virtualised feed overlap: the bottom of the
-    previous window is the top of this one. The overlap is therefore found as
-    the longest run that is a SUFFIX of *previous_rows* and a PREFIX of
-    *current_rows* (both in DOM order, headers included, ``{"key", "header"}``
-    entries) — anchored at both ends, so a row that merely repeats elsewhere
-    (a recurring payment) cannot pull the block onto another day. The
-    *leading_count* rows before this round's first header all belong to one
-    day: the day of the previous row that matches ``current_rows[0]``.
+    previous window is the top of this one. The overlap is found as the
+    longest run (at least ``_MIN_OVERLAP`` rows) that is a SUFFIX of
+    *previous_rows* and a PREFIX of *current_rows* (DOM order, headers
+    included, ``{"key", "header"}`` entries). The *leading_count* rows before
+    this round's first header all belong to one day: the day of the previous
+    row that matches ``current_rows[0]``.
 
-    ``None`` means no overlap of at least ``_MIN_OVERLAP`` rows (the first
-    round, a gap between the windows, an unparsed header in the way): the
-    caller skips those rows and counts them.
+    A run of recurring payments can still match by coincidence when the real
+    overlap was broken, so the result must also agree with the headers: the
+    day must be the one ``_expected_leading_header`` names, and newer than
+    this window's first header (days decrease down the feed). Any
+    disagreement, or no overlap at all, returns ``None``: the caller skips the
+    rows, counts them and marks the history incomplete.
     """
     if not leading_count or not previous_rows or not current_rows:
         return None
     current = [row.get("key") for row in current_rows]
     previous = [row.get("key") for row in previous_rows]
+    expected = _expected_leading_header(current_rows, previous_rows)
+    expected_date = _row_date(expected) if expected else None
+    first_header_date = next(
+        (_row_date(row.get("header")) for row in current_rows
+         if (row.get("key") or ("",))[0] == "H" and row.get("header")),
+        None,
+    )
     for size in range(min(len(current), len(previous)), _MIN_OVERLAP - 1, -1):
-        if previous[len(previous) - size:] == current[:size]:
-            header = previous_rows[len(previous) - size].get("header")
-            if header is None or not _row_date(header):
-                return None
-            return header
+        if previous[len(previous) - size:] != current[:size]:
+            continue
+        header = previous_rows[len(previous) - size].get("header")
+        date = _row_date(header) if header else None
+        if not date or date != expected_date:
+            return None
+        if first_header_date and not date > first_header_date:
+            return None
+        return header
     return None
 
 
@@ -1400,7 +1436,7 @@ def _judge_completeness(warnings, section_name, info, stop_before):
     headerless = info.get("headerless_rows") or 0
     if headerless:
         warnings.append(
-            "%s: %d operations could not be dated (their day header was not "
+            "%s: at least %d operations could not be dated (their day header was not "
             "rendered together with them) and were skipped"
             % (section_name, headerless)
         )

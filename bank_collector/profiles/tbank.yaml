@@ -37,9 +37,12 @@
 # of this one gives the whole leading block the date of the matching row —
 # all rows before a round's first header belong to one day. Anchoring at both
 # ends matters: looking the block up anywhere in the previous window dated a
-# recurring payment by the wrong day in a live run. An unparsed or skipped
-# header therefore cannot misdate them. Rows with no overlap at all (first
-# pass, a gap between windows, a header that was not rendered) are skipped,
+# recurring payment by the wrong day in a live run. The overlap must also
+# agree with the headers (the day right above this window's first header in
+# the previous window, and newer than that header), and optional fields
+# (description) are not part of the overlap key, since they can appear in a
+# later render. Rows with no such overlap (first pass, a gap between windows,
+# an unparsed header, a coincidental match) are skipped,
 # counted in `headerless_rows`, reported by a warning, and make the run
 # `complete: false`.
 #

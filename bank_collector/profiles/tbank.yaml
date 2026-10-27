@@ -37,16 +37,21 @@
 # rounds overlap and no row can slip between two scroll steps. `settle_ms` is
 # generous because the virtualised list re-renders asynchronously.
 #
-# status: draft — the structure above was probed by reading the live page,
-# but the end-to-end run (dates, sign of every amount, reaching
-# stop_before_date with complete: true) has not been checked yet. Move it to
-# `verified` only after comparing the report with the cabinet by eye.
+# status: verified on 2026-10-27 against the live cabinet: 325 operations
+# from 2025-12-31 to 2026-10-25 in 186 s (44 rounds, stop: date, complete:
+# true, no clicks). Every day whose header showed its expense total (86 of 138
+# days) was checked against the sum of the collected negative amounts: 85 match
+# to the ruble, the one remaining day differs only by a 300 000 ₽ "Покупка по
+# QR" (finance) that T-Bank leaves out of its own day total; no day has fewer
+# expenses than its header, dates never go backwards, and no operation repeats
+# on neighbouring days except genuinely recurring ones (transit fares, the
+# same transfer from another bank).
 #
 # Balances are not described yet: this profile reads the operations page
 # only. Balances come in a later step (other page / other markup).
 bank: tbank
-status: draft
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain; those rows are skipped in that pass and counted in scroll.headerless_rows. The scroll step is smaller than the viewport so rounds overlap. status: draft — the markup was read from the live page, the end-to-end numbers were not verified yet."
+status: verified
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain; those rows are skipped in that pass and counted in scroll.headerless_rows. The scroll step is smaller than the viewport so rounds overlap. Verified 2026-10-27: 325 operations back to 2025-12-31, day expense totals match the cabinet's own day headers."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
 

@@ -10,8 +10,8 @@ one container that holds the record's rows; it is pressed only when scrolling ad
 exactly one such `<button>` is there, so that the list renders its next page. A same-label control
 outside the list is never clicked. Nothing else is clicked. Data stays local (git-ignored `data/`).
 Banks are added as YAML profiles; today `alfa` is verified against a live cabinet, including the
-load-more click and its scope (verified live on 2026-10-26), `tbank` is a read-only draft whose
-operations feed was probed live on 2026-10-27 (no clicks; numbers not verified end to end), and
+load-more click and its scope (verified live on 2026-10-26), `tbank` (operations only, no clicks)
+is verified against the live cabinet on 2026-10-27 (day expense totals match the cabinet's), and
 `example` is a synthetic profile used by the tests.
 
 ---
@@ -90,7 +90,7 @@ bank-collector --bank alfa
 |---|---|---|---|
 | `example` | verified (синтетика) | остатки, операции | — (фикстура в тестах) |
 | `alfa` | **verified, 2026-10-24** | остатки по продуктам с главной, операции с `/history/` | да, живой кабинет в desktop Chrome |
-| `tbank` | **draft** | операции с `/mybank/operations/` (лента с заголовками дней, виртуализированный список) | разметка прочитана с живой страницы 2026-10-27 (только `goto`, чтение и колесо — без кликов); сквозные числа ещё не сверены |
+| `tbank` | **verified, 2026-10-27** | операции с `/mybank/operations/` (лента с заголовками дней, виртуализированный список) | да, живой кабинет: 325 операций до 2025-12-31 за 186 с, итоги расходов по дням совпали с заголовками дней кабинета (без кликов) |
 
 Что именно читает `tbank`: на `https://www.tbank.ru/mybank/operations/` — лента операций, где
 заголовок дня и операции лежат соседними `<li>` одного `<ul>`; дата берётся у заголовка

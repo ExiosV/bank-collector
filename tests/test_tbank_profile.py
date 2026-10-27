@@ -118,11 +118,12 @@ def _feed(*rows):
 # ---------------------------------------------------------------------------
 
 
-def test_the_profile_is_a_read_only_draft():
+def test_the_profile_is_read_only_and_verified():
     profile = load_profile("tbank")
 
     assert profile["bank"] == "tbank"
-    assert profile["status"] == "draft", "the end-to-end numbers are not checked yet"
+    # Verified live on 2026-10-27: day expense totals match the cabinet's own headers.
+    assert profile["status"] == "verified"
     assert profile["url"] == TBANK_URL
     assert profile["wait_for"] == OPERATION
 

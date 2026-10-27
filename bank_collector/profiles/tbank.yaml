@@ -48,14 +48,16 @@
 # rounds overlap and no row can slip between two scroll steps. `settle_ms` is
 # generous because the virtualised list re-renders asynchronously.
 #
-# status: verified on 2026-10-27 against the live cabinet: 325 operations
-# from 2025-12-31 to 2026-10-25 in 186 s (44 rounds, stop: date, complete:
-# true, no clicks). Only EXPENSES were checked numerically, and only on the 86
-# days (of 138) whose header shows an expense total: 85 of them match the sum
-# of the collected negative amounts to the ruble; the 86th differs only by a
-# 300 000 ₽ "Покупка по QR" (finance) that T-Bank leaves out of its own day
-# total. Income was not checked numerically. No day has fewer expenses than
-# its header and dates never go backwards.
+# status: verified on 2026-10-27 against the live cabinet (two runs, the
+# second with header carry: identical 325 operations from 2025-12-31 to
+# 2026-10-25, 44 rounds, stop: date, complete: true, headerless_rows 0, no
+# clicks, 186-262 s). Only EXPENSES were checked numerically, on the 87 days
+# (of 138) whose header showed an expense total: 80 match the collected
+# negative amounts to the ruble, the other 7 differ by exactly one operation
+# each that T-Bank leaves out of its own total (5 broker top-ups, one QR
+# purchase in "Финансы", one 200 ₽ autopayment in "Другое"). Income was not
+# checked numerically. No day has fewer expenses than its header, dates never
+# go backwards. Details: docs/verification/tbank-2026-10-27.md.
 #
 # The rows carry NO label saying "this is my own transfer": titles like
 # "Себе в другой банк", "Себе из другого банка", "Пополнение брокерского
@@ -67,7 +69,7 @@
 bank: tbank
 status: verified
 timezone: Europe/Moscow
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: headers seen so far are carried across the scroll rounds and date those rows. Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals (85 of 86 such days; the 86th differs by a QR purchase the bank excludes), income not checked numerically. Own-transfer titles are not labelled and must be filtered downstream. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: headers seen so far are carried across the scroll rounds and date those rows. Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals (80 of 87 such days exactly, the other 7 by one bank-excluded operation each), income not checked numerically. Own-transfer titles are not labelled and must be filtered downstream. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
 

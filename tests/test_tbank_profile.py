@@ -86,11 +86,11 @@ class VirtualFeedPage(FakePage):
         return None
 
 
-def _header(text):
+def _header(text, total="0 ₽"):
     return (
         "<li><div %s='atom-operations-feed-header'>%s"
-        "<span %s='atom-operations-feed-header-amount'>0 ₽</span></div></li>"
-        % (QA, text, QA)
+        "<span %s='atom-operations-feed-header-amount'>%s</span></div></li>"
+        % (QA, text, QA, total)
     )
 
 
@@ -1011,3 +1011,65 @@ def test_a_coincidental_overlap_that_disagrees_with_the_headers_is_rejected():
     assert ("2026-10-24", "Ж/д билет (тест)") in dated
     assert result["scroll"]["headerless_rows"] >= 1
     assert result["scroll"]["complete"] is False
+
+
+def test_a_day_short_of_its_header_total_is_reported_and_incomplete():
+    """Executor round 4: if a day header were dropped while rows on both sides of it
+    stay rendered, the rows below would silently inherit the previous day. The
+    cabinet's own day total catches it: the day whose operations moved away comes
+    out short of its header total, which is reported and makes the run incomplete."""
+    window_one = _feed(
+        _header("24 октября", "−100 ₽"),
+        _operation("Метро (тест)", "−100 ₽"),
+        _header("23 октября", "−50 ₽"),
+        _operation("Связь (тест)", "−50 ₽"),
+        # The 22 October header is missing from the DOM in this render.
+        _operation("Ж/д билет (тест)", "−700 ₽"),
+    )
+    window_two = _feed(
+        _operation("Связь (тест)", "−50 ₽"),
+        _operation("Ж/д билет (тест)", "−700 ₽"),
+        _header("22 октября", "−700 ₽"),
+        _header("21 октября", "−10 ₽"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    warnings = _warnings(result)
+    assert any("2026-10-22" in text and "below the cabinet's day total" in text for text in warnings)
+    assert result["scroll"]["complete"] is False
+    assert result["scroll"]["short_days"] >= 1
+    # The day total is not copied into the operation rows.
+    assert all("day_total" not in row for row in result["transactions"])
+
+
+def test_days_that_match_their_totals_raise_nothing():
+    window = _feed(
+        _header("24 октября", "−150 ₽"),
+        _operation("Метро (тест)", "−100 ₽"),
+        _operation("Кофе (тест)", "−50 ₽"),
+        _operation("Зарплата (тест)", "+1 000 ₽"),
+        _header("23 октября", "−20 ₽"),
+        _operation("Связь (тест)", "−20 ₽"),
+        _operation("Перевод себе (тест)", "−5 000 ₽"),  # banks leave own transfers out of the total
+        _header("22 октября", "−1 ₽"),
+        _operation("Магазин (тест)", "−1 ₽"),
+    )
+    page = VirtualFeedPage([window])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    assert not any("day total" in text for text in _warnings(result))
+    assert "short_days" not in result["scroll"]

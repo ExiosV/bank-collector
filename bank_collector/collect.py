@@ -68,6 +68,7 @@ button with exactly that text inside the one container named by
 import re
 import time
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -556,12 +557,76 @@ def _record_from_snapshot(fields, record_def, where_prefix, warnings, now=None):
     return out
 
 
+#: A header field with this name is the cabinet's own expense total of the day
+#: ("27 октября−1 234 ₽"). It is not copied into the operation rows; after
+#: scrolling, every day in the requested range whose collected expenses are
+#: SMALLER than that total is reported and makes the history incomplete — a
+#: day can only come out short when an operation was lost or dated by another
+#: day. (Collected expenses may exceed the total: banks leave transfers to own
+#: accounts out of it.)
+DAY_TOTAL_FIELD = "day_total"
+
+
+def _remember_day_total(carry, header):
+    """Keep the latest non-empty day total of a header, by its parsed date."""
+    if carry is None or not header:
+        return
+    field = header.get(DAY_TOTAL_FIELD)
+    date = _row_date(header)
+    if not date or not isinstance(field, dict) or not field.get("money"):
+        return
+    carry.setdefault("day_totals", {})[date] = field.get("value")
+
+
+def _short_days(rows, day_totals, stop_before):
+    """The days whose collected expenses are below the cabinet's own day total.
+
+    Only days inside the requested range are judged: a day older than
+    *stop_before* (or, without it, the oldest day reached) may be cut by the
+    stop itself. Totals are whole rubles in the header, so a difference
+    under 1 is rounding.
+    """
+    if not day_totals:
+        return []
+    spent = {}
+    dates = set()
+    for row in rows:
+        date = _row_date(row)
+        if not date:
+            continue
+        dates.add(date)
+        try:
+            amount = Decimal(_field_text(row, "amount"))
+        except (InvalidOperation, ValueError):
+            continue
+        if amount < 0:
+            spent[date] = spent.get(date, Decimal(0)) - amount
+    floor = stop_before or (min(dates) if dates else None)
+    short = []
+    for date, total in sorted(day_totals.items()):
+        if floor and (date < floor or (not stop_before and date == floor)):
+            continue
+        try:
+            expected = Decimal(str(total))
+        except (InvalidOperation, ValueError):
+            continue
+        # The header total is the day's expenses (negative); anything else is not
+        # a figure the collected expenses can be held against.
+        if expected >= 0:
+            continue
+        expected = -expected
+        got = spent.get(date, Decimal(0))
+        if got + 1 <= expected:
+            short.append((date, got, expected))
+    return short
+
+
 def _merge_row(header, item_fields, row_prefix, warnings):
     """One output row: the current header values plus the operation's fields.
 
     The operation wins on a field-name clash (and the clash is reported).
     """
-    merged = dict(header)
+    merged = {name: value for name, value in header.items() if name != DAY_TOTAL_FIELD}
     for name, value in item_fields.items():
         if name in header:
             warnings.append(
@@ -726,6 +791,7 @@ def _records_from_snapshot(
                 fields, header_def, "%s.header" % row_prefix, warnings, now=now
             )
             round_rows.append({"key": _header_key(current_header), "header": current_header})
+            _remember_day_total(carry, current_header)
             seen_header = True
             continue
         if not seen_header:
@@ -860,6 +926,7 @@ def _extract_rows(
                     row, header_def, "%s.header" % row_prefix, warnings, now=now
                 )
                 round_rows.append({"key": _header_key(current_header), "header": current_header})
+                _remember_day_total(carry, current_header)
                 seen_header = True
                 continue
             if not seen_header:
@@ -1486,6 +1553,23 @@ def extract_section(
             page, record_def, section_name, warnings, results, scroll_def,
             timeout_ms=timeout_ms, now=now, headerless=headerless, carry=carry,
         )
+        short = _short_days(
+            results, (carry or {}).get("day_totals"), scroll_def.get("stop_before_date")
+        )
+        if short:
+            info["short_days"] = len(short)
+            info["complete"] = False
+            for date, got, expected in short[:_SCROLL_WARNING_LIMIT]:
+                warnings.append(
+                    "%s: %s: collected expenses %s are below the cabinet's day total %s "
+                    "(an operation was lost or dated by another day)"
+                    % (section_name, date, got, expected)
+                )
+            if len(short) > _SCROLL_WARNING_LIMIT:
+                warnings.append(
+                    "%s: %d more days are short of their day total"
+                    % (section_name, len(short) - _SCROLL_WARNING_LIMIT)
+                )
         if scroll_info is not None:
             scroll_info.update(info)
 

@@ -102,7 +102,10 @@ def test_the_flat_feed_is_read_in_one_page_side_pass():
     spec = page.snapshot_calls[0]
     assert spec["row"] == ROW
     assert spec["header_selector"] == HEADER
-    assert spec["header_fields"] == {"date": {"selector": HEADER}}
+    assert spec["header_fields"] == {
+        "date": {"selector": HEADER},
+        "day_total": {"selector": "[data-qa-type=atom-operations-feed-header-amount]"},
+    }
     assert spec["fields"]["description"] == {"selector": DESCRIPTION}
     for fields in (spec["fields"], spec["header_fields"]):
         for name, field in fields.items():

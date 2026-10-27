@@ -97,6 +97,12 @@ transactions:
           # "27 октября−1 234 ₽" -> 2026-10-27 (a year is inferred when the
           # text has none; anything after the date is ignored).
           parse: ru_date
+        # The cabinet's own expense total of the day ("−1 234 ₽", whole rubles).
+        # Not copied into the rows: after scrolling, a day whose collected
+        # expenses are below it is reported and makes the run incomplete.
+        day_total:
+          selector: "[data-qa-type=atom-operations-feed-header-amount]"
+          optional: true
     fields:
       title:
         selector: "[data-qa-type=atom-operations-feed-operation-title]"

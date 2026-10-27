@@ -30,12 +30,16 @@
 # stays around 25–31 — old rows are removed from the DOM and older ones are
 # appended (infinite scroll, no button). A day header can therefore scroll
 # out of the DOM while some of its operations are still rendered. Those rows
-# would have no header in that pass, so the driver carries the ordered list
-# of headers seen so far across the scroll rounds of one section: operations
-# above a round's first header take the header that immediately precedes it
-# in that list, and a round without any header takes the last header
-# carried. Only a pass with nothing suitable carried (the very first pass may
-# start with operations) skips its leading rows, counted in `headerless_rows`.
+# would have no header in that pass, so every round keeps its operation rows
+# (their content key and date) and the leading rows of the next round are
+# dated by their OVERLAP with the round before: the longest prefix of the
+# leading block that appears as a contiguous run in the previous window
+# (the last occurrence wins) gives the whole block that day's date — all rows
+# before a round's first header belong to one day. An unparsed or skipped
+# header therefore cannot misdate them. Rows with no overlap at all (first
+# pass, a gap between windows, a header that was not rendered) are skipped,
+# counted in `headerless_rows`, reported by a warning, and make the run
+# `complete: false`.
 #
 # Dedup limitation (honest): a row is recognised as a duplicate by
 # (date, title, category, amount), counted per round. Two identical
@@ -69,7 +73,7 @@
 bank: tbank
 status: verified
 timezone: Europe/Moscow
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: headers seen so far are carried across the scroll rounds and date those rows. Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals (80 of 87 such days exactly, the other 7 by one bank-excluded operation each), income not checked numerically. Own-transfer titles are not labelled and must be filtered downstream. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: the leading rows of a round are dated by their overlap with the previous round, and rows with no overlap are skipped, counted and reported (the run is then incomplete). Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals (80 of 87 such days exactly, the other 7 by one bank-excluded operation each), income not checked numerically. Own-transfer titles are not labelled and must be filtered downstream. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
 

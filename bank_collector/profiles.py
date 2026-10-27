@@ -32,7 +32,9 @@ Canonical form::
 ``timezone`` is optional: an IANA name (``Europe/Moscow`` by default) of the
 cabinet's own timezone. Day headers are rendered there, so ``parse: ru_date``
 resolves "Сегодня", "Вчера" and a year-less date on that calendar day, not on
-the UTC one.
+the UTC one. When the tz database is missing altogether (native Windows
+without the ``tzdata`` package) every name is accepted and the run resolves
+dates in UTC with a warning.
 
 A record (one entry of ``balances`` or ``transactions``) accepts the keys
 ``row``, ``fields``, ``url``, ``wait_for``, ``items``, ``header`` and
@@ -860,7 +862,21 @@ def _validate(data, path):
         timezone_name = timezone_name.strip()
         try:
             ZoneInfo(timezone_name)
-        except (ZoneInfoNotFoundError, ValueError):
+        except ZoneInfoNotFoundError:
+            # Either the name is wrong, or the tz database itself is absent
+            # (native Windows without the `tzdata` package): there, every
+            # name raises. Probe a name no database would lack; if even that
+            # fails, accept the name and resolve it at run time.
+            try:
+                ZoneInfo("UTC")
+            except ZoneInfoNotFoundError:
+                pass
+            else:
+                raise ProfileError(
+                    "%s: 'timezone' %r is not a known IANA timezone name"
+                    % (where, timezone_name)
+                )
+        except ValueError:
             raise ProfileError(
                 "%s: 'timezone' %r is not a known IANA timezone name"
                 % (where, timezone_name)

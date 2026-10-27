@@ -291,6 +291,60 @@ def test_a_header_with_or_without_its_day_total_keeps_the_same_date():
 
 
 # ---------------------------------------------------------------------------
+# The element fallback aligns the leading rows exactly like the one-pass path
+# ---------------------------------------------------------------------------
+
+
+def test_the_element_path_aligns_the_leading_block_like_the_snapshot_path():
+    def windows():
+        return [
+            _feed(
+                _header("27 октября"),
+                _operation("Магазин А (тест)", "−10 ₽"),
+                _operation("Магазин Б (тест)", "−20 ₽"),
+            ),
+            _feed(
+                # No header at all: only the overlap with the first window
+                # can date these rows.
+                _operation("Магазин Б (тест)", "−20 ₽"),
+                _operation("Магазин В (тест)", "−30 ₽"),
+            ),
+            _feed(
+                _operation("Магазин В (тест)", "−30 ₽"),
+                _operation("Магазин Г (тест)", "−40 ₽"),
+                _header("26 октября"),
+                _operation("Магазин Д (тест)", "−50 ₽"),
+            ),
+        ]
+
+    record = load_profile("tbank")["transactions"][0]
+    record["scroll"].update(
+        {"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}
+    )
+    snapshot_warnings = []
+    element_warnings = []
+
+    snapshot_rows = extract_section(
+        VirtualFeedPage(windows()), record, "transactions", snapshot_warnings,
+        timeout_ms=1, now=FIXED_NOW,
+    )
+    element_rows = extract_section(
+        ElementOnlyPage(VirtualFeedPage(windows())), record, "transactions",
+        element_warnings, timeout_ms=1, now=FIXED_NOW,
+    )
+
+    assert element_rows == snapshot_rows
+    assert element_warnings == snapshot_warnings == []
+    assert [(row["date"]["value"], row["title"]["value"]) for row in element_rows] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Магазин Б (тест)"),
+        ("2026-10-27", "Магазин В (тест)"),
+        ("2026-10-27", "Магазин Г (тест)"),
+        ("2026-10-26", "Магазин Д (тест)"),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # The real JS string, when node with jsdom happens to be installed
 # ---------------------------------------------------------------------------
 

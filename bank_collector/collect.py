@@ -319,7 +319,7 @@ def _today(now):
     return now
 
 
-def _local_now(now, profile):
+def _local_now(now, profile, warnings=None):
     """The run instant on the cabinet's own calendar day.
 
     Day headers ("Сегодня", «27 октября» without a year) are rendered in the
@@ -327,6 +327,11 @@ def _local_now(now, profile):
     timezone's calendar day, not UTC's: at 01:30 Moscow time on 1 January
     UTC still says 31 December. *now* is a ``datetime`` (naive is read as
     UTC) or a ``date``; a date is already a calendar day and stays as it is.
+
+    A hand-written profile with an unknown name falls back to the default
+    timezone. When the tz database itself is missing (native Windows without
+    ``tzdata``) even that fails: the dates are then resolved in UTC and a
+    warning says so, instead of aborting the run.
     """
     if not isinstance(now, datetime):
         return now
@@ -338,7 +343,15 @@ def _local_now(now, profile):
     except Exception:
         # The profile validator already rejects an unknown name; a profile
         # built by hand falls back to the default rather than aborting.
-        zone = ZoneInfo(DEFAULT_TIMEZONE)
+        try:
+            zone = ZoneInfo(DEFAULT_TIMEZONE)
+        except Exception:
+            if warnings is not None:
+                warnings.append(
+                    "timezone %s unavailable (no tz database?), dates resolved in UTC"
+                    % timezone_name
+                )
+            return now.astimezone(timezone.utc)
     return now.astimezone(zone)
 
 
@@ -559,46 +572,96 @@ def _merge_row(header, item_fields, row_prefix, warnings):
     return merged
 
 
-def _merge_round_headers(carry, round_headers):
-    """Append the day headers of one pass to the carried list, in feed order.
+def _content_key(row, record_def):
+    """Identify an operation by its fields, without the day header.
 
-    Only headers whose date actually parsed are kept, and a date already in
-    the list is not added twice: a virtualised feed re-renders the same
-    headers round after round, and the carry is about the *days* seen so far,
-    not about the rows.
+    The key is compared between the rendered windows of two scroll rounds,
+    so it must not contain the date: the date is exactly what the alignment
+    is trying to recover. Header field names are left out in case a record
+    defines one in both places.
     """
-    if carry is None:
+    header_names = set((record_def.get("header") or {}).get("fields") or ())
+    return tuple(
+        _field_text(row, name)
+        for name in record_def.get("fields") or {}
+        if name not in header_names
+    )
+
+
+def _last_occurrence(haystack, needle):
+    """The index of the last contiguous *needle* inside *haystack*, or None."""
+    size = len(needle)
+    if not size or size > len(haystack):
+        return None
+    for index in range(len(haystack) - size, -1, -1):
+        if haystack[index : index + size] == needle:
+            return index
+    return None
+
+
+def _count_headerless(counter, leading, carry=None):
+    """Count the operation rows a round had to skip for lack of a date.
+
+    A virtualised window keeps rendering the same undated rows round after
+    round, so *carry* remembers how many instances of each content key were
+    already counted: a row is counted once per rendered instance, not once
+    per pass. Without *carry* (a single pass) every row is counted.
+    """
+    if counter is None:
         return
-    carried = carry["headers"]
-    known = {_row_date(header) for header in carried}
-    for header in round_headers:
-        key = _row_date(header)
-        if not key or key in known:
-            continue
-        known.add(key)
-        carried.append(header)
+    seen = None
+    if carry is not None:
+        seen = carry.get("headerless_seen")
+        if seen is None:
+            seen = Counter()
+            carry["headerless_seen"] = seen
+    local = Counter(entry[2] for entry in leading)
+    added = 0
+    for key, count in local.items():
+        known = seen.get(key, 0) if seen is not None else 0
+        if count > known:
+            added += count - known
+            if seen is not None:
+                seen[key] = count
+    counter["headerless_rows"] = counter.get("headerless_rows", 0) + added
 
 
-def _leading_header(round_headers, carry):
-    """The header that dates the operations above this pass's first header.
+def _align_leading(leading_keys, previous_rows):
+    """Date the leading rows of a round by their overlap with the round before.
 
-    The feed runs newest first, so the day of those operations is the header
-    that immediately precedes this pass's first header in the carried list.
-    A pass with no header at all belongs to the last day carried. ``None``
-    means nothing suitable was carried (the very first pass may start with
-    operations) — the caller skips and counts those rows.
+    The rendered windows of two consecutive scroll rounds overlap: the rows
+    at the top of this round (before its first header) continue the day whose
+    header was seen earlier, and those of them that were already rendered in
+    the previous round carry that day's date.  The overlap is therefore a
+    prefix of *leading_keys*; it is looked up as a contiguous run in
+    *previous_rows* (``{"key", "header"}`` in DOM order), and the LAST
+    occurrence wins, because the scroll moves the window down the feed.
+
+    A full match is tried first; when the newest rows of the leading block
+    were appended between the rounds, the longest matching prefix is used
+    instead — all rows before a round's first header belong to one day, so
+    the whole block inherits the date of the matched rows.  ``None`` means
+    there is no usable overlap (no overlap at all, a gap between the
+    windows, an unparsed or skipped header, or the first round): the caller
+    skips those rows and counts them.
     """
-    if carry is None:
+    if not leading_keys or not previous_rows:
         return None
-    carried = carry["headers"]
-    if not round_headers:
-        return carried[-1] if carried else None
-    key = _row_date(round_headers[0])
-    if not key:
-        return None
-    for index, header in enumerate(carried):
-        if _row_date(header) == key:
-            return carried[index - 1] if index else None
+    keys = [row.get("key") for row in previous_rows]
+    for size in range(min(len(leading_keys), len(keys)), 0, -1):
+        index = _last_occurrence(keys, list(leading_keys[:size]))
+        if index is None:
+            continue
+        matched = previous_rows[index : index + size]
+        headers = [row.get("header") for row in matched]
+        if any(header is None for header in headers):
+            return None
+        dates = {_row_date(header) for header in headers}
+        if len(dates) != 1 or None in dates:
+            # The matched run straddles two days (or has no date): no
+            # alignment can be trusted, so the rows are left undated.
+            return None
+        return headers[0]
     return None
 
 
@@ -609,16 +672,18 @@ def _records_from_snapshot(
 
     Rows are walked in DOM order, so a row is dated by the day header that
     precedes it in the same snapshot. Operations before the first header of
-    this pass inherit the header carried over from the previous rounds (see
-    ``_leading_header``); when nothing suitable is carried they have no date:
-    they are skipped silently and counted in ``counter["headerless_rows"]``
-    exactly like the element-by-element pass does.
+    this pass are aligned with the rows rendered in the previous round (see
+    ``_align_leading``); when no overlap can be established they have no
+    date: they are skipped silently and counted in
+    ``counter["headerless_rows"]`` exactly like the element-by-element pass
+    does. Every round stores its operation rows — dated or not — in *carry*
+    for the next round.
     """
     header_def = record_def["header"]
     current_header = None
     results = []
     leading = []
-    round_headers = []
+    round_rows = []
     seen_header = False
 
     for position, item in enumerate(snapshot):
@@ -633,27 +698,44 @@ def _records_from_snapshot(
             current_header = _record_from_snapshot(
                 fields, header_def, "%s.header" % row_prefix, warnings, now=now
             )
-            round_headers.append(current_header)
             seen_header = True
             continue
         if not seen_header:
-            # The fields are read only once the carry says which day these
-            # rows belong to; a skip must stay silent.
-            leading.append((row_prefix, fields))
+            # Read the fields now — the overlap alignment needs their content
+            # key. The warnings are held back: a row that cannot be dated is
+            # skipped silently, exactly like before.
+            local_warnings = []
+            item_fields = _record_from_snapshot(
+                fields, record_def, row_prefix, local_warnings, now=now
+            )
+            key = _content_key(item_fields, record_def)
+            leading.append((row_prefix, item_fields, key, local_warnings))
+            round_rows.append({"key": key, "header": None})
             continue
 
         item_fields = _record_from_snapshot(fields, record_def, row_prefix, warnings, now=now)
         results.append(_merge_row(current_header, item_fields, row_prefix, warnings))
+        round_rows.append(
+            {"key": _content_key(item_fields, record_def), "header": current_header}
+        )
 
-    _merge_round_headers(carry, round_headers)
-    attribution = _leading_header(round_headers, carry)
+    attribution = _align_leading(
+        [entry[2] for entry in leading],
+        (carry or {}).get("rows") or [],
+    )
     leading_results = []
     if attribution is not None:
-        for row_prefix, fields in leading:
-            item_fields = _record_from_snapshot(fields, record_def, row_prefix, warnings, now=now)
-            leading_results.append(_merge_row(attribution, item_fields, row_prefix, warnings))
-    elif counter is not None:
-        counter["headerless_rows"] = counter.get("headerless_rows", 0) + len(leading)
+        for row_prefix, item_fields, _key, local_warnings in leading:
+            warnings.extend(local_warnings)
+            leading_results.append(
+                _merge_row(attribution, item_fields, row_prefix, warnings)
+            )
+        for entry in round_rows[: len(leading)]:
+            entry["header"] = attribution
+    else:
+        _count_headerless(counter, leading, carry)
+    if carry is not None:
+        carry["rows"] = round_rows
     return leading_results + results
 
 
@@ -708,9 +790,10 @@ def _extract_rows(
     both the day headers and the operations. A header row updates the current
     header values and is not emitted; an operation row inherits them (the
     operation wins on a clash). Operations before the first header of a pass
-    inherit the header carried over from earlier rounds of the same section;
-    only when nothing suitable is carried do they have no date — then they
-    are skipped silently and counted in ``counter["headerless_rows"]``.
+    are aligned with the rows rendered in the previous round (see
+    ``_align_leading``); only when no overlap can be established do they have
+    no date — then they are skipped silently and counted in
+    ``counter["headerless_rows"]``.
 
     When the page offers ``snapshot_rows`` and the record has both a ``row``
     and a ``header``, the whole feed is read in one page-side pass in DOM
@@ -736,7 +819,7 @@ def _extract_rows(
         current_header = None
         seen_header = False
         leading = []
-        round_headers = []
+        round_rows = []
         for row_index, row in enumerate(rows):
             row_prefix = "%s[%d]" % (section_name, row_index)
             try:
@@ -751,24 +834,41 @@ def _extract_rows(
                 current_header = extract_record(
                     row, header_def, "%s.header" % row_prefix, warnings, now=now
                 )
-                round_headers.append(current_header)
                 seen_header = True
                 continue
             if not seen_header:
-                leading.append((row_prefix, row))
+                # Extracted here, not after the loop: the overlap alignment
+                # needs the content key of every leading row. The warnings
+                # are held back, so a row that cannot be dated stays silent.
+                local_warnings = []
+                item = extract_record(
+                    row, record_def, row_prefix, local_warnings, now=now
+                )
+                key = _content_key(item, record_def)
+                leading.append((row_prefix, item, key, local_warnings))
+                round_rows.append({"key": key, "header": None})
                 continue
             item = extract_record(row, record_def, row_prefix, warnings, now=now)
             results.append(_merge_row(current_header, item, row_prefix, warnings))
+            round_rows.append(
+                {"key": _content_key(item, record_def), "header": current_header}
+            )
 
-        _merge_round_headers(carry, round_headers)
-        attribution = _leading_header(round_headers, carry)
+        attribution = _align_leading(
+            [entry[2] for entry in leading],
+            (carry or {}).get("rows") or [],
+        )
         leading_results = []
         if attribution is not None:
-            for row_prefix, row in leading:
-                item = extract_record(row, record_def, row_prefix, warnings, now=now)
+            for row_prefix, item, _key, local_warnings in leading:
+                warnings.extend(local_warnings)
                 leading_results.append(_merge_row(attribution, item, row_prefix, warnings))
-        elif counter is not None:
-            counter["headerless_rows"] = counter.get("headerless_rows", 0) + len(leading)
+            for entry in round_rows[: len(leading)]:
+                entry["header"] = attribution
+        else:
+            _count_headerless(counter, leading, carry)
+        if carry is not None:
+            carry["rows"] = round_rows
         return leading_results + results
 
     for row_index, row in enumerate(rows):
@@ -1114,16 +1214,17 @@ def _scroll_section(
     how many rows were collected in total, how many load-more clicks were
     made (always 0 when the feature is off), how many empty rounds found no
     matching button in the list (``load_more_missing``), how many operation
-    rows had no day header even in the carried list and were therefore
-    skipped (``headerless_rows``) and why the scrolling stopped.
+    rows could not be dated at all and were therefore skipped
+    (``headerless_rows``) and why the scrolling stopped.
 
-    *carry* carries the day headers seen so far across the rounds of this
-    section (see ``_leading_header``). It is created here when the caller did
-    not provide one and the record is a flat feed.
+    *carry* holds the operation rows of the previous round, with their dates,
+    so that the leading rows of the next round can be aligned with them (see
+    ``_align_leading``). It is created here when the caller did not provide
+    one and the record is a flat feed.
     """
     counter = headerless if headerless is not None else {"headerless_rows": 0}
     if carry is None and record_def.get("header"):
-        carry = {"headers": []}
+        carry = {"rows": []}
     scroll_by = getattr(page, "scroll_by", None)
     if scroll_by is None:
         # The page cannot scroll — nothing is done, and it is said so.
@@ -1288,24 +1389,36 @@ def _judge_completeness(warnings, section_name, info, stop_before):
     rendered the older rows yet; without this flag such a run would look
     like a complete history. Without *stop_before* only a list that stopped
     growing counts as complete. The round limit has a warning of its own.
+
+    Rows that could not be dated at all (``headerless_rows``) were silently
+    dropped from the output, so a run with any of them is never complete:
+    the warning says how many operations are missing and why.
     """
     stop = info["stop"]
     oldest = info.get("oldest_date")
     if stop == "date":
-        info["complete"] = True
-        return
-    if stop == "limit":
-        info["complete"] = False
-        return
-    if not stop_before:
-        info["complete"] = stop == "empty"
-        return
-    info["complete"] = oldest is not None and oldest <= stop_before
-    if not info["complete"]:
+        complete = True
+    elif stop == "limit":
+        complete = False
+    elif not stop_before:
+        complete = stop == "empty"
+    else:
+        complete = oldest is not None and oldest <= stop_before
+        if not complete:
+            warnings.append(
+                "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
+                % (section_name, oldest or "no dated row", stop_before, stop)
+            )
+
+    headerless = info.get("headerless_rows") or 0
+    if headerless:
         warnings.append(
-            "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
-            % (section_name, oldest or "no dated row", stop_before, stop)
+            "%s: %d operations could not be dated (their day header was not "
+            "rendered together with them) and were skipped"
+            % (section_name, headerless)
         )
+        complete = False
+    info["complete"] = complete
 
 
 def extract_section(
@@ -1334,11 +1447,12 @@ def extract_section(
 
     headerless = {"headerless_rows": 0}
     scroll_def = record_def.get("scroll")
-    # The day headers seen so far travel from the first pass into every
-    # scroll round, so an operation whose header already left a virtualised
-    # DOM is still dated. Without scrolling there is no later round to carry
-    # them into, and the single pass behaves as it always did.
-    carry = {"headers": []} if scroll_def and record_def.get("header") else None
+    # The operation rows (with their dates) travel from one pass into the
+    # next, so an operation whose header already left a virtualised DOM can
+    # still be dated by its overlap with the previous rendered window.
+    # Without scrolling there is no later round to carry them into, and the
+    # single pass behaves as it always did.
+    carry = {"rows": []} if scroll_def and record_def.get("header") else None
     results = _extract_rows_stable(
         page, record_def, section_name, warnings, timeout_ms=timeout_ms,
         now=now, counter=headerless, carry=carry,
@@ -1367,9 +1481,10 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     "load_more_missing": E, "headerless_rows": H, "complete": bool}``) that
     tells how the scroll ended, how far back it reached, how many load-more
     clicks it made, how many empty rounds found no matching button in the
-    list container, how many operation rows had no day header even in the
-    carried list of headers (a virtualised flat feed) and whether that is the
-    whole history the profile asked for.
+    list container, how many operation rows could not be dated at all and
+    were therefore skipped (``headerless_rows``, a virtualised flat feed with
+    no reliable overlap between rounds) and whether that is the whole history
+    the profile asked for.
 
     *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
     relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field
@@ -1386,7 +1501,7 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
         now = datetime.now(timezone.utc)
     if isinstance(now, datetime) and now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    local_now = _local_now(now, profile)
+    local_now = _local_now(now, profile, warnings)
 
     try:
         page.goto(url)

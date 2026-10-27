@@ -11,12 +11,15 @@ appended) — and the fact that reading it writes nothing into the page.
 import os
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import bank_collector.collect as collect_module  # noqa: E402
+import bank_collector.profiles as profiles_module  # noqa: E402
 from bank_collector.collect import collect, extract_section, parse_ru_date  # noqa: E402
 from bank_collector.profiles import ProfileError, load_profile  # noqa: E402
 from fake_page import FakePage  # noqa: E402
@@ -524,6 +527,250 @@ def test_virtualised_scrolling_reaches_the_stop_date_and_is_complete():
     assert result["scroll"]["headerless_rows"] == 0
     assert _warnings(result) == []
     assert page.writes == []
+
+
+# ---------------------------------------------------------------------------
+# Overlap alignment: the leading rows are dated by the round before, not by
+# a list of headers that may have skipped a day in between
+# ---------------------------------------------------------------------------
+
+
+def test_a_round_with_no_header_stays_inside_the_day_of_the_overlap():
+    """The whole leading block belongs to one day: the overlap proves which.
+
+    The second window renders no header at all (the day is longer than the
+    viewport), so only the overlap with the first window can date it. The
+    rows appended after that overlap still belong to the same day.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
+    )
+    window_two = _feed(
+        _operation("Магазин Б (тест)", "−20 ₽"),
+        _operation("Магазин В (тест)", "−30 ₽"),
+        _operation("Магазин Г (тест)", "−40 ₽"),
+    )
+    window_three = _feed(
+        _operation("Магазин Г (тест)", "−40 ₽"),
+        _operation("Магазин Д (тест)", "−50 ₽"),
+        _header("26 октября"),
+        _operation("Магазин Е (тест)", "−60 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two, window_three])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    assert [(row["date"]["value"], row["title"]["value"]) for row in result["transactions"]] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Магазин Б (тест)"),
+        ("2026-10-27", "Магазин В (тест)"),
+        ("2026-10-27", "Магазин Г (тест)"),
+        ("2026-10-27", "Магазин Д (тест)"),
+        ("2026-10-26", "Магазин Е (тест)"),
+    ]
+    assert result["scroll"]["headerless_rows"] == 0
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
+
+
+def test_an_unparsed_header_between_rounds_skips_rows_instead_of_misdating_them():
+    """A header that did not parse must not make the next day look like the last.
+
+    The carried-header list used to skip an unparsed header and date the
+    rows after it with the previous day's header. These rows have no overlap
+    with the first window, so they are skipped and counted, never guessed.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
+        _header("скоро"),
+    )
+    window_two = _feed(
+        _operation("Магазин В (тест)", "−30 ₽"),
+        _operation("Магазин Г (тест)", "−40 ₽"),
+        _header("26 октября"),
+        _operation("Магазин Д (тест)", "−50 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    rows = result["transactions"]
+    assert [(row["date"]["value"], row["title"]["value"]) for row in rows] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Магазин Б (тест)"),
+        ("2026-10-26", "Магазин Д (тест)"),
+    ], "the two rows after the unparsed header are not dated 27 October"
+    assert result["scroll"]["headerless_rows"] == 2
+    assert result["scroll"]["complete"] is False
+    assert any(
+        "2 operations could not be dated" in text and "and were skipped" in text
+        for text in result["warnings"]
+    )
+    assert any("cannot parse ru_date" in text for text in result["warnings"])
+
+
+def test_a_header_skipped_between_windows_is_not_inferred():
+    """No overlap between two windows: the day stays unknown, not guessed.
+
+    The header of the new day was never rendered together with its rows, and
+    none of those rows was rendered before. The previous window's 27 October
+    header must not be reused for them.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
+    )
+    window_two = _feed(
+        _operation("Магазин В (тест)", "−30 ₽"),
+        _operation("Магазин Г (тест)", "−40 ₽"),
+    )
+    window_three = _feed(
+        _operation("Магазин Г (тест)", "−40 ₽"),
+        _header("26 октября"),
+        _operation("Магазин Д (тест)", "−50 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two, window_three])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    rows = result["transactions"]
+    assert [(row["date"]["value"], row["title"]["value"]) for row in rows] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Магазин Б (тест)"),
+        ("2026-10-26", "Магазин Д (тест)"),
+    ]
+    assert [row["title"]["value"] for row in rows].count("Магазин Г (тест)") == 0
+    assert result["scroll"]["headerless_rows"] == 2
+    assert result["scroll"]["complete"] is False
+    assert any("could not be dated" in text for text in result["warnings"])
+
+
+def test_recurring_identical_content_on_two_days_keeps_the_right_day():
+    """Two equal operations on two days: the overlap picks the lower run.
+
+    Both days render the same (title, category, amount) pair. The leading
+    block of the next round is the pair of the *lower* day, so the LAST
+    contiguous match in the previous window is the one that dates it.
+    """
+    window_one = _feed(
+        _header("27 октября"),
+        _operation("Магазин А (тест)", "−10 ₽"),
+        _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+        _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
+        _header("26 октября"),
+        _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+        _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
+    )
+    window_two = _feed(
+        _operation("Кофе (тест)", "−100 ₽", "Кафе и рестораны"),
+        _operation("Чай (тест)", "−50 ₽", "Кафе и рестораны"),
+        _header("25 октября"),
+        _operation("Магазин Б (тест)", "−20 ₽"),
+    )
+    page = VirtualFeedPage([window_one, window_two])
+
+    result = collect(
+        page,
+        _profile({"stop_before_date": None, "stop_after_empty_rounds": 2, "max_rounds": 10}),
+        timeout_ms=1,
+        now=FIXED_NOW,
+    )
+
+    rows = result["transactions"]
+    assert [(row["date"]["value"], row["title"]["value"]) for row in rows] == [
+        ("2026-10-27", "Магазин А (тест)"),
+        ("2026-10-27", "Кофе (тест)"),
+        ("2026-10-27", "Чай (тест)"),
+        ("2026-10-26", "Кофе (тест)"),
+        ("2026-10-26", "Чай (тест)"),
+        ("2026-10-25", "Магазин Б (тест)"),
+    ]
+    assert result["scroll"]["headerless_rows"] == 0
+    assert _warnings(result) == []
+
+
+# ---------------------------------------------------------------------------
+# A missing tz database must not abort the run
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_tz_database_accepts_the_timezone_name(tmp_path, monkeypatch):
+    def missing(name):
+        raise ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(profiles_module, "ZoneInfo", missing)
+    path = tmp_path / "tbank_no_tzdata.yaml"
+    path.write_text(
+        "bank: tbank_no_tzdata\n"
+        "status: unverified\n"
+        'url: "https://www.tbank.ru/mybank/operations/"\n'
+        'wait_for: "#x"\n'
+        "timezone: Europe/Moscow\n"
+        "balances: []\n"
+        "transactions:\n"
+        "  - row: 'li'\n"
+        "    fields:\n"
+        "      amount:\n"
+        "        selector: '.amount'\n",
+        encoding="utf-8",
+    )
+
+    profile = load_profile("tbank_no_tzdata", directory=str(tmp_path))
+
+    assert profile["timezone"] == "Europe/Moscow"
+
+
+def test_a_missing_tz_database_resolves_dates_in_utc_with_a_warning(monkeypatch):
+    def missing(name):
+        raise ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(collect_module, "ZoneInfo", missing)
+    # 22:30 UTC on 31 December is already 1 January in Moscow.
+    now = datetime(2026, 12, 31, 22, 30, tzinfo=timezone.utc)
+    page = FakePage(
+        _feed(_header("Сегодня−1 ₽"), _operation("Сегодня (тест)", "−1 ₽")),
+        url=TBANK_URL,
+    )
+
+    result = collect(
+        page,
+        _profile(
+            {
+                "stop_before_date": None,
+                "stop_after_empty_rounds": 1,
+                "max_rounds": 1,
+                "settle_ms": 0,
+            }
+        ),
+        timeout_ms=1,
+        now=now,
+    )
+
+    assert result["transactions"][0]["date"]["value"] == "2026-12-31"
+    assert (
+        "timezone Europe/Moscow unavailable (no tz database?), dates resolved in UTC"
+        in result["warnings"]
+    )
 
 
 # ---------------------------------------------------------------------------

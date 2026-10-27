@@ -30,6 +30,7 @@ __all__ = [
 
 import os
 import re
+from urllib.parse import parse_qsl, quote, urlsplit
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 
@@ -41,7 +42,8 @@ CDP_URL_ENV = "BANK_COLLECTOR_CDP_URL"
 # and user:password@ — and a bare token=... wherever it is quoted.
 _URL_SECRET_RES = (
     (re.compile(r"(\w+://)[^/@\s]*@"), r"\1***@"),
-    (re.compile(r"\?[^\s'\"]*"), "?***"),
+    (re.compile(r"\?[^\s'\"#]*"), "?***"),
+    (re.compile(r"#[^\s'\"]*"), "#***"),
     (re.compile(r"(?i)(token=)[^&\s'\"]+"), r"\1***"),
 )
 
@@ -50,15 +52,60 @@ def resolve_cdp_url(flag=None):
     """The CDP URL: the explicit flag, else ``$BANK_COLLECTOR_CDP_URL``, else the default."""
     if flag is not None:
         return flag
-    return os.environ.get(CDP_URL_ENV) or DEFAULT_CDP_URL
+    value = os.environ.get(CDP_URL_ENV)
+    if value is None:
+        return DEFAULT_CDP_URL
+    if not value.strip():
+        # A broken env file must fail loudly, not attach to whatever holds port 9222.
+        raise BrowserUnavailable("$%s is set but empty." % CDP_URL_ENV)
+    return value.strip()
 
 
-def redact_url(text):
-    """*text* with every URL query, userinfo and ``token=`` value replaced by ``***``."""
+#: Values shorter than this are not removed one by one (they would blank out
+#: ordinary words); the URL-shape patterns still mask them inside the URL.
+_MIN_SECRET_LEN = 4
+
+
+def _url_secrets(url):
+    """The literal secret values a URL carries: query values, the password, the fragment.
+
+    A library error may repeat them without the URL around them (or
+    percent-encoded), where the shape-based patterns cannot see them.
+    """
+    try:
+        parts = urlsplit(str(url))
+        password = parts.password
+        visible = {parts.netloc.rpartition("@")[2], parts.hostname or "", str(parts.port or "")}
+    except ValueError:
+        # A malformed URL (a typo in the env file): the shape-based patterns still apply.
+        return []
+    values = [value for _name, value in parse_qsl(parts.query, keep_blank_values=False)]
+    # ...and as written, undecoded ("+" stays "+"), since that is what an error repeats.
+    values += [pair.partition("=")[2] for pair in parts.query.split("&")]
+    values += [password or "", parts.fragment or ""]
+    found = set()
+    for value in values:
+        # Very short values would blank out ordinary words; host and port are what the
+        # operator needs to fix the connection and are not secrets.
+        if len(value) >= _MIN_SECRET_LEN and value not in visible:
+            found.update((value, quote(value, safe="")))
+    return sorted(found, key=len, reverse=True)
+
+
+def redact_url(text, url=None):
+    """*text* with every URL query, fragment, userinfo and ``token=`` value replaced by ``***``.
+
+    With *url*, the literal secret values of that URL are removed as well,
+    wherever they appear in *text*.
+    """
     text = str(text)
+    if url is not None:
+        for secret in _url_secrets(url):
+            text = text.replace(secret, "***")
     for regex, repl in _URL_SECRET_RES:
         text = regex.sub(repl, text)
     return text
+
 
 # Navigation is the only slow part: an SPA cabinet can take a while to answer.
 GOTO_TIMEOUT_MS = 60000
@@ -148,7 +195,7 @@ def connect(cdp_url=DEFAULT_CDP_URL, timeout_ms=15000):
         # endpoint in its own error: neither may reach stderr (= the log).
         raise BrowserUnavailable(
             "Could not attach to a browser at %s.\n%s\n\nOriginal error: %s"
-            % (redact_url(cdp_url), _HINT, redact_url(str(exc).replace(cdp_url, redact_url(cdp_url))))
+            % (redact_url(cdp_url, cdp_url), _HINT, redact_url(exc, cdp_url))
         ) from None
     return playwright, browser
 

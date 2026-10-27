@@ -17,6 +17,9 @@ the list is scrolled.
 
 __all__ = [
     "DEFAULT_CDP_URL",
+    "CDP_URL_ENV",
+    "resolve_cdp_url",
+    "redact_url",
     "BrowserUnavailable",
     "PageAdapter",
     "FrameAdapter",
@@ -25,7 +28,37 @@ __all__ = [
     "available_browsers",
 ]
 
+import os
+import re
+
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+
+#: The environment variable that may hold the CDP URL: a relay URL carries a
+#: token, which must not sit in argv or in shell history.
+CDP_URL_ENV = "BANK_COLLECTOR_CDP_URL"
+
+# The parts of a URL that may hold a secret: the query string, the fragment
+# and user:password@ — and a bare token=... wherever it is quoted.
+_URL_SECRET_RES = (
+    (re.compile(r"(\w+://)[^/@\s]*@"), r"\1***@"),
+    (re.compile(r"\?[^\s'\"]*"), "?***"),
+    (re.compile(r"(?i)(token=)[^&\s'\"]+"), r"\1***"),
+)
+
+
+def resolve_cdp_url(flag=None):
+    """The CDP URL: the explicit flag, else ``$BANK_COLLECTOR_CDP_URL``, else the default."""
+    if flag is not None:
+        return flag
+    return os.environ.get(CDP_URL_ENV) or DEFAULT_CDP_URL
+
+
+def redact_url(text):
+    """*text* with every URL query, userinfo and ``token=`` value replaced by ``***``."""
+    text = str(text)
+    for regex, repl in _URL_SECRET_RES:
+        text = regex.sub(repl, text)
+    return text
 
 # Navigation is the only slow part: an SPA cabinet can take a while to answer.
 GOTO_TIMEOUT_MS = 60000
@@ -111,9 +144,12 @@ def connect(cdp_url=DEFAULT_CDP_URL, timeout_ms=15000):
             playwright.stop()
         except Exception:  # pragma: no cover - defensive
             pass
+        # The URL of a relay carries its token, and Playwright repeats the
+        # endpoint in its own error: neither may reach stderr (= the log).
         raise BrowserUnavailable(
-            "Could not attach to a browser at %s.\n%s\n\nOriginal error: %s" % (cdp_url, _HINT, exc)
-        ) from exc
+            "Could not attach to a browser at %s.\n%s\n\nOriginal error: %s"
+            % (redact_url(cdp_url), _HINT, redact_url(str(exc).replace(cdp_url, redact_url(cdp_url))))
+        ) from None
     return playwright, browser
 
 

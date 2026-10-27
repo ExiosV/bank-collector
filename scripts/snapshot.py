@@ -23,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bank_collector.connect import DEFAULT_CDP_URL, BrowserUnavailable, connect  # noqa: E402
+from bank_collector.connect import DEFAULT_CDP_URL, BrowserUnavailable, connect, resolve_cdp_url  # noqa: E402
 from bank_collector.profiles import ProfileError, load_profile  # noqa: E402
 from bank_collector.sanitize import sanitize_html, sanitize_text  # noqa: E402
 
@@ -35,7 +35,10 @@ def build_parser():
     )
     parser.add_argument("--bank", metavar="NAME", help="profile whose URL should be opened")
     parser.add_argument("--url", metavar="URL", help="explicit URL to open (overrides the profile)")
-    parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help="CDP endpoint (default: %(default)s)")
+    parser.add_argument(
+        "--cdp-url", default=None,
+        help="CDP endpoint (default: $BANK_COLLECTOR_CDP_URL, else %s)" % DEFAULT_CDP_URL,
+    )
     parser.add_argument("--out", default="data/snapshots", help="output directory (default: %(default)s)")
     parser.add_argument("--wait-for", metavar="CSS", help="CSS selector to wait for before dumping")
     parser.add_argument("--timeout", type=int, default=20000, help="wait timeout in ms (default: %(default)s)")
@@ -69,7 +72,7 @@ def main(argv=None):
     os.makedirs(args.out, exist_ok=True)
 
     try:
-        playwright, browser = connect(args.cdp_url, timeout_ms=args.timeout)
+        playwright, browser = connect(resolve_cdp_url(args.cdp_url), timeout_ms=args.timeout)
     except BrowserUnavailable as exc:
         sys.stderr.write("browser error: %s\n" % exc)
         return 2

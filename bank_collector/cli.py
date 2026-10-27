@@ -44,7 +44,15 @@ import time
 
 from . import __version__, report as report_mod
 from .collect import DEFAULT_TIMEOUT_MS, collect
-from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
+from .connect import (
+    CDP_URL_ENV,
+    DEFAULT_CDP_URL,
+    BrowserUnavailable,
+    PageAdapter,
+    connect,
+    resolve_cdp_url,
+)
+
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
 from .unlock import (
@@ -98,11 +106,13 @@ def build_parser():
     parser.add_argument("--bank", metavar="NAME", help="bank profile to use (see --list-profiles)")
     parser.add_argument(
         "--cdp-url",
-        default=DEFAULT_CDP_URL,
+        default=None,
         metavar="URL",
         help=(
-            "CDP endpoint of the browser you started yourself "
-            "(default: %(default)s). A playwriter relay URL is accepted too."
+            "CDP endpoint of the browser you started yourself (default: $%s, "
+            "else %s). A playwriter relay URL is accepted too; prefer the "
+            "environment variable when the URL carries a token, so it does not "
+            "show up in argv or in shell history." % (CDP_URL_ENV, DEFAULT_CDP_URL)
         ),
     )
     parser.add_argument(
@@ -498,6 +508,9 @@ def _import_statement(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cdp_url is not None and not args.cdp_url.strip():
+        # An empty --cdp-url "$CDP" in a script must not fall through silently.
+        parser.error("--cdp-url is empty")
 
     if args.list_profiles:
         _print_profiles()
@@ -513,7 +526,7 @@ def main(argv=None):
             parser.error("--bank is required with --import-statement")
         if args.enter_code:
             parser.error("--enter-code cannot be used with --import-statement")
-        if args.cdp_url != DEFAULT_CDP_URL:
+        if args.cdp_url is not None:
             parser.error("--cdp-url cannot be used with --import-statement")
         if args.as_json or args.as_csv:
             parser.error("--json/--csv cannot be used with --import-statement")
@@ -536,7 +549,7 @@ def main(argv=None):
         profile = _without_scroll(profile)
 
     try:
-        playwright, browser = connect(args.cdp_url, timeout_ms=args.timeout)
+        playwright, browser = connect(resolve_cdp_url(args.cdp_url), timeout_ms=args.timeout)
     except BrowserUnavailable as exc:
         sys.stderr.write("browser error: %s\n" % exc)
         return EXIT_NO_BROWSER

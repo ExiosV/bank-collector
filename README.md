@@ -50,10 +50,18 @@ bank-collector --bank alfa --cdp-url http://127.0.0.1:9222           # реал�
 bank-collector --bank example --cdp-url http://127.0.0.1:9222        # пример (синтетический)
 bank-collector --bank alfa --snapshot                                # + обезличенный снапшот страницы
 
-# Если браузер подключён через реле Playwriter, вместо порта отладки можно дать его CDP-адрес:
-bank-collector --bank alfa --cdp-url "ws://<host>:19988/cdp?token=<token>"
-
+# Браузер за реле Playwriter: адрес с токеном — только через переменную окружения из файла 0600,
+# не в командной строке и не в истории shell (флаг --cdp-url важнее переменной):
+#   ~/.config/bank-collector/cdp.env:  BANK_COLLECTOR_CDP_URL=ws://<host>:19988/cdp?token=<token>
+set -a; . ~/.config/bank-collector/cdp.env; set +a
+bank-collector --bank alfa
 ```
+
+Для systemd то же самое — `EnvironmentFile=%h/.config/bank-collector/cdp.env` в юните. Переменная
+убирает токен из argv и истории команд, но не делает его невидимым совсем: окружение процесса видно
+тому же пользователю (`/proc/<pid>/environ`, `ps e`). В сообщениях об ошибке подключения адрес
+печатается без query-строки и `user:pass@` (`ws://<host>:19988/cdp?***`), так что в лог токен не
+попадает. `--cdp-url "ws://...?token=..."` по-прежнему работает, но кладёт токен в `ps` и в историю.
 
 Выходные файлы: `data/<bank>.json`, `data/<bank>-balances.csv` и `data/<bank>-transactions.csv`.
 Коды возврата: `0` — успех, `2` — браузер недоступен, `3` — профиль невалиден/не найден,

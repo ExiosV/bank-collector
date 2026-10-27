@@ -43,7 +43,8 @@
 # (description) are not part of the overlap key, since they can appear in a
 # later render. Rows with no such overlap (first pass, a gap between windows,
 # an unparsed header, a coincidental match) are skipped,
-# counted in `headerless_rows`, reported by a warning, and make the run
+# counted in `headerless_rows` (a lower bound: the same recurring row skipped
+# on two days is counted once), reported by a warning, and make the run
 # `complete: false`.
 #
 # Dedup limitation (honest): a row is recognised as a duplicate by
@@ -57,16 +58,15 @@
 # rounds overlap and no row can slip between two scroll steps. `settle_ms` is
 # generous because the virtualised list re-renders asynchronously.
 #
-# status: verified on 2026-10-27 against the live cabinet. Shipped-code run
-# (329a7fd): 325 operations from 2025-12-31 (only that day of December) to
-# 2026-10-27, 44 rounds, stop: date, complete: true, headerless_rows 0, no
-# clicks, 190 s. Only EXPENSES were checked numerically, on the 86 days (of
-# 138) whose header showed an expense total: 79 match the collected negative
-# amounts to the ruble, the other 7 differ by exactly one operation each that
-# T-Bank leaves out of its own total (5 broker top-ups, one QR purchase in
-# "Финансы", one 200 ₽ autopayment in "Другое"). Income was not checked
-# numerically. No day has fewer expenses than its header, dates never go
-# backwards. Every run of every version: docs/verification/tbank-2026-10-27.md.
+# status: verified on 2026-10-27 against the live cabinet with the shipped
+# code (4bb5b03): 324 operations from 2025-12-31 to 2026-10-27, 44 rounds,
+# stop: date, complete: true, headerless_rows 0, no clicks, 188 s; the
+# run-time day-total check found no short day. Re-checked by hand: 86 days (of
+# 138) showed an expense total, 81 match the collected negative amounts to the
+# ruble, the other 5 differ by exactly one operation T-Bank leaves out of its
+# own total (4 broker top-ups, one 200 ₽ autopayment in "Другое"). Income was
+# not checked numerically. Earlier runs (history of the design):
+# docs/verification/tbank-2026-10-27.md.
 #
 # The rows carry NO label saying "this is my own transfer": titles like
 # "Себе в другой банк", "Себе из другого банка", "Пополнение брокерского
@@ -78,7 +78,7 @@
 bank: tbank
 status: verified
 timezone: Europe/Moscow
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: the leading rows of a round are dated by their overlap with the previous round, and rows with no overlap are skipped, counted and reported (the run is then incomplete). Verified 2026-10-27: 325 operations back to 2025-12-31; expenses match the cabinet's own day totals on the shipped-code run (79 of 86 such days exactly, the other 7 by one bank-excluded operation each, none short), income not checked numerically. The first and last months of the file are partial. Own-transfer titles are not labelled (observed titles listed in README, not exhaustive) and must be filtered downstream. Sum only data/tbank.json with scroll.complete true, never a .partial.json. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: the leading rows of a round are dated by their overlap with the previous round, and rows with no overlap are skipped, counted and reported (the run is then incomplete). Verified 2026-10-27 with the shipped code (4bb5b03): 324 operations back to 2025-12-31; every day is checked at run time against the cabinet's own expense total (no short day), by hand 81 of 86 such days match exactly and the other 5 by one bank-excluded operation each; income not checked numerically. The first and last months of the file are partial. Own-transfer titles are not labelled (observed titles listed in README, not exhaustive) and must be filtered downstream. Sum only data/tbank.json with scroll.complete true, never a .partial.json. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
 

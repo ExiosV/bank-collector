@@ -97,6 +97,42 @@ def test_unknown_status_is_rejected(tmp_path):
     assert "status" in str(excinfo.value)
 
 
+def test_draft_status_is_rejected(tmp_path):
+    """``draft`` was dropped: a profile is verified or unverified, nothing else."""
+    path = tmp_path / "draft.yaml"
+    path.write_text(
+        "bank: draft\nstatus: draft\nurl: \"https://x.invalid/\"\n"
+        'wait_for: "#x"\nbalances: []\ntransactions: []\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ProfileError, match="status"):
+        load_profile("draft", directory=str(tmp_path))
+
+
+def test_timezone_is_an_optional_iana_name(tmp_path):
+    path = tmp_path / "tz.yaml"
+    path.write_text(
+        "bank: tz\nstatus: verified\nurl: \"https://x.invalid/\"\n"
+        'wait_for: "#x"\ntimezone: Europe/Moscow\n'
+        "balances: []\ntransactions: []\n",
+        encoding="utf-8",
+    )
+    profile = load_profile("tz", directory=str(tmp_path))
+    assert profile["timezone"] == "Europe/Moscow"
+
+
+def test_unknown_timezone_is_rejected(tmp_path):
+    path = tmp_path / "bad_tz.yaml"
+    path.write_text(
+        "bank: bad_tz\nstatus: verified\nurl: \"https://x.invalid/\"\n"
+        'wait_for: "#x"\ntimezone: Mars/Olympus_Mons\n'
+        "balances: []\ntransactions: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ProfileError, match="timezone"):
+        load_profile("bad_tz", directory=str(tmp_path))
+
+
 def test_credential_shaped_keys_are_rejected(tmp_path):
     path = tmp_path / "creds.yaml"
     path.write_text(

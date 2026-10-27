@@ -43,6 +43,19 @@ day) that holds the fields of the group (the date) and an inner set of rows
 (the operations themselves). The fields of the group and of the item are
 merged into one output row.
 
+A record may carry ``header`` instead when the feed is *flat*: day headers
+and operations are siblings in one list. ``row`` then matches every row of
+the feed; a row that contains ``header.selector`` is a header, its
+``header.fields`` become the current header values, and every other row is an
+operation that inherits them. A page that offers ``snapshot_rows(spec)`` is
+read in ONE pass over there: every row comes back with its raw field text in
+DOM order, so the driver dates each operation by the header that precedes it
+in that order. Across the scroll rounds of one section the headers seen so
+far are carried along, so an operation whose header already left a
+virtualised DOM is still dated by it; only a pass with no suitable header
+carried (for instance the very first one) has its leading operations skipped
+silently.
+
 Finally a record may carry ``scroll``: the driver then scrolls the rendered
 list (read-only) and reads the rows that the cabinet appends while the list
 is scrolled, until the list stops growing, the date limit of the profile is
@@ -55,17 +68,26 @@ button with exactly that text inside the one container named by
 import re
 import time
 from collections import Counter
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 __all__ = [
     "collect",
     "extract_section",
     "extract_record",
     "parse_money",
+    "parse_ru_date",
     "normalise_value",
     "DEFAULT_TIMEOUT_MS",
 ]
 
 DEFAULT_TIMEOUT_MS = 20000
+
+#: The cabinet's local timezone when the profile does not name one. Russian
+#: cabinets render day headers in Moscow time, so "Сегодня" must be resolved
+#: against the Moscow calendar day, not the UTC one.
+DEFAULT_TIMEZONE = "Europe/Moscow"
 
 # Money-like text: an optional sign, a number with (optional) thousands
 # separators and (optional) a two-digit fraction, then an optional currency
@@ -243,6 +265,143 @@ def _currency_in(text):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Russian day headers
+# ---------------------------------------------------------------------------
+
+#: Russian month names as they appear in cabinet day headers.  Genitive is
+#: what banks write ("27 октября"), the nominative forms are accepted too so
+#: that a differently worded header does not lose its date.
+_RU_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+    "январь": 1,
+    "февраль": 2,
+    "март": 3,
+    "апрель": 4,
+    "май": 5,
+    "июнь": 6,
+    "июль": 7,
+    "август": 8,
+    "сентябрь": 9,
+    "октябрь": 10,
+    "ноябрь": 11,
+    "декабрь": 12,
+}
+
+#: The leading date of a header.  Everything after it — the day's total, an
+#: amount, a currency — is ignored, so the pattern is not anchored at the end.
+_RU_DATE_RE = re.compile(
+    r"^\s*(?P<day>\d{1,2})\s+(?P<month>[а-яё]+)(?:\s+(?P<year>\d{4}))?",
+    re.IGNORECASE,
+)
+
+#: "Сегодня" / "Вчера" headers.  The word boundary is Unicode-aware, so it
+#: also matches when the total is glued to the word ("Сегодня−1 234 ₽").
+_RU_RELATIVE_RE = re.compile(r"^\s*(?P<word>сегодня|вчера)\b", re.IGNORECASE)
+
+
+def _today(now):
+    """The calendar day of *now* (a ``datetime``, a ``date`` or ``None``)."""
+    if now is None:
+        return datetime.now(timezone.utc).date()
+    if isinstance(now, datetime):
+        return now.date()
+    return now
+
+
+def _local_now(now, profile, warnings=None):
+    """The run instant on the cabinet's own calendar day.
+
+    Day headers ("Сегодня", «27 октября» without a year) are rendered in the
+    cabinet's local timezone, so they must be resolved against that
+    timezone's calendar day, not UTC's: at 01:30 Moscow time on 1 January
+    UTC still says 31 December. *now* is a ``datetime`` (naive is read as
+    UTC) or a ``date``; a date is already a calendar day and stays as it is.
+
+    A hand-written profile with an unknown name falls back to the default
+    timezone. When the tz database itself is missing (native Windows without
+    ``tzdata``) even that fails: the dates are then resolved in UTC and a
+    warning says so, instead of aborting the run.
+    """
+    if not isinstance(now, datetime):
+        return now
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    timezone_name = profile.get("timezone") or DEFAULT_TIMEZONE
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:
+        # The profile validator already rejects an unknown name; a profile
+        # built by hand falls back to the default rather than aborting.
+        try:
+            zone = ZoneInfo(DEFAULT_TIMEZONE)
+        except Exception:
+            if warnings is not None:
+                warnings.append(
+                    "timezone %s unavailable (no tz database?), dates resolved in UTC"
+                    % timezone_name
+                )
+            return now.astimezone(timezone.utc)
+    return now.astimezone(zone)
+
+
+def parse_ru_date(text, now=None):
+    """Parse a Russian day header into an ISO ``YYYY-MM-DD`` string.
+
+    Accepted forms (case-insensitive): ``"27 октября"``, ``"27 октября 2025"``,
+    ``"Сегодня"`` and ``"Вчера"``.  Any text after the date — the day's total
+    in a header such as ``"27 октября−1 234 ₽"`` — is ignored: only the
+    leading date is matched.
+
+    A missing year is inferred relative to *now*: the current year, or the
+    previous year when that would put the date in the future (a header
+    "29 декабря" read in October belongs to the previous December).  Returns
+    ``None`` when the text does not start with a date the parser knows.
+    """
+    if text is None:
+        return None
+    text = str(text)
+    today = _today(now)
+
+    relative = _RU_RELATIVE_RE.match(text)
+    if relative:
+        word = relative.group("word").lower()
+        if word == "сегодня":
+            return today.isoformat()
+        return (today - timedelta(days=1)).isoformat()
+
+    match = _RU_DATE_RE.match(text)
+    if not match:
+        return None
+    month = _RU_MONTHS.get(match.group("month").lower())
+    if month is None:
+        return None
+    day = int(match.group("day"))
+
+    year = match.group("year")
+    try:
+        if year is not None:
+            return date(int(year), month, day).isoformat()
+        candidate = date(today.year, month, day)
+        if candidate > today:
+            candidate = date(today.year - 1, month, day)
+        return candidate.isoformat()
+    except ValueError:
+        # 31 февраля and friends: not a date, so the field stays empty.
+        return None
+
+
 def _apply_regex(text, spec, where, warnings):
     pattern = spec.get("regex")
     if not pattern:
@@ -261,24 +420,60 @@ def _apply_regex(text, spec, where, warnings):
         return None
 
 
-def extract_record(row, record_def, where_prefix, warnings):
+def _empty_field():
+    """A field that could not be read at all."""
+    return {"raw": None, "value": None, "currency": None, "money": False}
+
+
+def _process_text(text, spec, where, warnings, now=None):
+    """Turn the raw text of one field into its output field.
+
+    This is the second half of ``extract_record``: the regex/group step, the
+    money normalisation and the ``parse: ru_date`` step. It is shared with the
+    page-side snapshot path (``_records_from_snapshot``), so a field read from
+    a snapshot has exactly the shape of a field read element by element.
+    """
+    matched = _apply_regex(text, spec, where, warnings)
+    if matched is None:
+        return {"raw": text, "value": None, "currency": None, "money": False}
+
+    if spec.get("parse") == "ru_date":
+        iso = parse_ru_date(matched, now)
+        if iso is None:
+            warnings.append("%s: cannot parse ru_date from %r" % (where, matched))
+        return {"raw": text, "value": iso, "currency": None, "money": False}
+
+    normalised = normalise_value(matched)
+    normalised["raw"] = text
+    return normalised
+
+
+def extract_record(row, record_def, where_prefix, warnings, now=None):
     """Read the fields of one record out of *row*.
 
     *where_prefix* is the human readable position of the row, e.g.
     ``"transactions[0]"``; the warnings are prefixed with it, so a broken
     selector reads ``transactions[0].amount: selector '...' matched nothing``.
+
+    A field may say ``optional: true``: a missing element (or a missing
+    ``attr``) then yields an empty field silently instead of a warning.  A
+    field may also say ``parse: ru_date``: its text is turned into an ISO
+    ``YYYY-MM-DD`` date relative to *now*, and an unparseable value becomes
+    ``None`` with one warning.
     """
     fields = {}
     for name, spec in record_def["fields"].items():
         where = "%s.%s" % (where_prefix, name)
+        optional = bool(spec.get("optional"))
         try:
             matches = row.query_all(spec["selector"])
         except Exception as exc:  # pragma: no cover - defensive
             warnings.append("%s: selector %r failed (%s)" % (where, spec["selector"], exc))
             matches = []
         if not matches:
-            warnings.append("%s: selector %r matched nothing" % (where, spec["selector"]))
-            fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+            if not optional:
+                warnings.append("%s: selector %r matched nothing" % (where, spec["selector"]))
+            fields[name] = _empty_field()
             continue
 
         element = matches[0]
@@ -292,25 +487,347 @@ def extract_record(row, record_def, where_prefix, warnings):
             if attr:
                 text = element.get_attribute(attr)
                 if text is None:
-                    warnings.append("%s: attribute %r missing" % (where, attr))
-                    fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+                    if not optional:
+                        warnings.append("%s: attribute %r missing" % (where, attr))
+                    fields[name] = _empty_field()
                     continue
             else:
                 text = element.text_content()
         except Exception as exc:
             warnings.append("%s: reading %r failed (%s)" % (where, spec.get("selector"), exc))
-            fields[name] = {"raw": None, "value": None, "currency": None, "money": False}
+            fields[name] = _empty_field()
             continue
 
-        matched = _apply_regex(text, spec, where, warnings)
-        if matched is None:
-            fields[name] = {"raw": text, "value": None, "currency": None, "money": False}
-            continue
-
-        normalised = normalise_value(matched)
-        normalised["raw"] = text
-        fields[name] = normalised
+        fields[name] = _process_text(text, spec, where, warnings, now=now)
     return fields
+
+
+def _page_fields(fields):
+    """Only the parts of field specs the page itself needs.
+
+    ``regex``, ``group``, ``parse`` and ``optional`` stay in Python: the page
+    returns raw text, the driver turns it into the output field.
+    """
+    spec = {}
+    for name, field in fields.items():
+        entry = {"selector": field["selector"]}
+        attr = field.get("attr")
+        if attr:
+            entry["attr"] = attr
+        spec[name] = entry
+    return spec
+
+
+def _snapshot_spec(record_def, header_def):
+    """The selector spec of one page-side pass over a flat feed."""
+    return {
+        "row": record_def.get("row"),
+        "header_selector": header_def["selector"],
+        "header_fields": _page_fields(header_def["fields"]),
+        "fields": _page_fields(record_def["fields"]),
+    }
+
+
+def _snapshot_field(fields, name, spec, where, warnings, now=None):
+    """One output field from the snapshot entry of that field."""
+    optional = bool(spec.get("optional"))
+    entry = fields.get(name) or {}
+    if not entry.get("found"):
+        if not optional:
+            warnings.append("%s: selector %r matched nothing" % (where, spec["selector"]))
+        return _empty_field()
+
+    text = entry.get("text")
+    attr = spec.get("attr")
+    if attr and text is None:
+        if not optional:
+            warnings.append("%s: attribute %r missing" % (where, attr))
+        return _empty_field()
+    if text is None:
+        text = ""
+    return _process_text(text, spec, where, warnings, now=now)
+
+
+def _record_from_snapshot(fields, record_def, where_prefix, warnings, now=None):
+    """Turn the snapshot fields of one row into an output record."""
+    out = {}
+    for name, spec in record_def["fields"].items():
+        where = "%s.%s" % (where_prefix, name)
+        out[name] = _snapshot_field(fields, name, spec, where, warnings, now=now)
+    return out
+
+
+#: A header field with this name is the cabinet's own expense total of the day
+#: ("27 октября−1 234 ₽"). It is not copied into the operation rows; after
+#: scrolling, every day in the requested range whose collected expenses are
+#: SMALLER than that total is reported and makes the history incomplete — a
+#: day can only come out short when an operation was lost or dated by another
+#: day. (Collected expenses may exceed the total: banks leave transfers to own
+#: accounts out of it.)
+DAY_TOTAL_FIELD = "day_total"
+
+
+def _remember_day_total(carry, header):
+    """Keep the latest non-empty day total of a header, by its parsed date."""
+    if carry is None or not header:
+        return
+    field = header.get(DAY_TOTAL_FIELD)
+    date = _row_date(header)
+    if not date or not isinstance(field, dict) or not field.get("money"):
+        return
+    carry.setdefault("day_totals", {})[date] = field.get("value")
+
+
+def _short_days(rows, day_totals, stop_before):
+    """The days whose collected expenses are below the cabinet's own day total.
+
+    Only days inside the requested range are judged: a day older than
+    *stop_before* (or, without it, the oldest day reached) may be cut by the
+    stop itself. Totals are whole rubles in the header, so a difference
+    under 1 is rounding.
+    """
+    if not day_totals:
+        return []
+    spent = {}
+    dates = set()
+    for row in rows:
+        date = _row_date(row)
+        if not date:
+            continue
+        dates.add(date)
+        try:
+            amount = Decimal(_field_text(row, "amount"))
+        except (InvalidOperation, ValueError):
+            continue
+        if amount < 0:
+            spent[date] = spent.get(date, Decimal(0)) - amount
+    floor = stop_before or (min(dates) if dates else None)
+    short = []
+    for date, total in sorted(day_totals.items()):
+        if floor and (date < floor or (not stop_before and date == floor)):
+            continue
+        try:
+            expected = Decimal(str(total))
+        except (InvalidOperation, ValueError):
+            continue
+        # The header total is the day's expenses (negative); anything else is not
+        # a figure the collected expenses can be held against.
+        if expected >= 0:
+            continue
+        expected = -expected
+        got = spent.get(date, Decimal(0))
+        if got + 1 <= expected:
+            short.append((date, got, expected))
+    return short
+
+
+def _merge_row(header, item_fields, row_prefix, warnings):
+    """One output row: the current header values plus the operation's fields.
+
+    The operation wins on a field-name clash (and the clash is reported).
+    """
+    merged = {name: value for name, value in header.items() if name != DAY_TOTAL_FIELD}
+    for name, value in item_fields.items():
+        if name in header:
+            warnings.append(
+                "%s: field %r is defined both in the header and in the item"
+                % (row_prefix, name)
+            )
+        merged[name] = value
+    return merged
+
+
+def _content_key(row, record_def):
+    """Identify an operation by its fields, without the day header.
+
+    The key is compared between the rendered windows of two scroll rounds,
+    so it must not contain the date: the date is exactly what the alignment
+    is trying to recover. Header field names are left out in case a record
+    defines one in both places.
+    """
+    header_names = set((record_def.get("header") or {}).get("fields") or ())
+    # Optional fields (a description, cashback text) may appear in a later render
+    # of the same row; a key that changes between two windows breaks the overlap.
+    return tuple(
+        _field_text(row, name)
+        for name, spec in (record_def.get("fields") or {}).items()
+        if name not in header_names and not (isinstance(spec, dict) and spec.get("optional"))
+    )
+
+
+def _count_headerless(counter, leading, carry=None):
+    """Count the operation rows a round had to skip for lack of a date.
+
+    A virtualised window keeps rendering the same undated rows round after
+    round, so *carry* remembers how many instances of each content key were
+    already counted: a row is counted once per rendered instance, not once
+    per pass. Without *carry* (a single pass) every row is counted.
+    """
+    if counter is None:
+        return
+    seen = None
+    if carry is not None:
+        seen = carry.get("headerless_seen")
+        if seen is None:
+            seen = Counter()
+            carry["headerless_seen"] = seen
+    local = Counter(entry[2] for entry in leading)
+    added = 0
+    for key, count in local.items():
+        known = seen.get(key, 0) if seen is not None else 0
+        if count > known:
+            added += count - known
+            if seen is not None:
+                seen[key] = count
+    counter["headerless_rows"] = counter.get("headerless_rows", 0) + added
+
+
+#: How many rows two consecutive windows must share before the top of the
+#: newer one is dated from the older one. One shared row could be a
+#: coincidence (the same 320 ₽ phone top-up on two days); two in a row, with
+#: the headers between them, is the overlap of the scroll step.
+_MIN_OVERLAP = 2
+
+
+def _header_key(header):
+    """The sequence key of a day header: its parsed date, else its raw text."""
+    return ("H", _row_date(header) or _field_text(header, "date") or repr(sorted(header)))
+
+
+def _expected_leading_header(current_rows, previous_rows):
+    """The day the leading block must belong to, according to the headers alone.
+
+    The leading block sits right above this window's first header. In the
+    previous window that place is right before the same header (when it was
+    already rendered there), else at the very bottom (the header is new).
+    Every entry carries the header that dates it (a header entry carries
+    itself), so the entry just above that place names the day.
+    """
+    first = next((row.get("key") for row in current_rows if (row.get("key") or ("",))[0] == "H"), None)
+    position = len(previous_rows)
+    if first is not None:
+        for index in range(len(previous_rows) - 1, -1, -1):
+            if previous_rows[index].get("key") == first:
+                position = index
+                break
+    if position == 0:
+        return None
+    return previous_rows[position - 1].get("header")
+
+
+def _align_leading(current_rows, previous_rows, leading_count):
+    """Date the leading rows of a round by the overlap with the round before.
+
+    Two consecutive windows of a virtualised feed overlap: the bottom of the
+    previous window is the top of this one. The overlap is found as the
+    longest run (at least ``_MIN_OVERLAP`` rows) that is a SUFFIX of
+    *previous_rows* and a PREFIX of *current_rows* (DOM order, headers
+    included, ``{"key", "header"}`` entries). The *leading_count* rows before
+    this round's first header all belong to one day: the day of the previous
+    row that matches ``current_rows[0]``.
+
+    A run of recurring payments can still match by coincidence when the real
+    overlap was broken, so the result must also agree with the headers: the
+    day must be the one ``_expected_leading_header`` names, and newer than
+    this window's first header (days decrease down the feed). Any
+    disagreement, or no overlap at all, returns ``None``: the caller skips the
+    rows, counts them and marks the history incomplete.
+    """
+    if not leading_count or not previous_rows or not current_rows:
+        return None
+    current = [row.get("key") for row in current_rows]
+    previous = [row.get("key") for row in previous_rows]
+    expected = _expected_leading_header(current_rows, previous_rows)
+    expected_date = _row_date(expected) if expected else None
+    first_header_date = next(
+        (_row_date(row.get("header")) for row in current_rows
+         if (row.get("key") or ("",))[0] == "H" and row.get("header")),
+        None,
+    )
+    for size in range(min(len(current), len(previous)), _MIN_OVERLAP - 1, -1):
+        if previous[len(previous) - size:] != current[:size]:
+            continue
+        header = previous_rows[len(previous) - size].get("header")
+        date = _row_date(header) if header else None
+        if not date or date != expected_date:
+            return None
+        if first_header_date and not date > first_header_date:
+            return None
+        return header
+    return None
+
+
+def _records_from_snapshot(
+    snapshot, record_def, section_name, warnings, now=None, counter=None, carry=None
+):
+    """Build the records of a flat feed from one page-side snapshot.
+
+    Rows are walked in DOM order, so a row is dated by the day header that
+    precedes it in the same snapshot. Operations before the first header of
+    this pass are aligned with the rows rendered in the previous round (see
+    ``_align_leading``); when no overlap can be established they have no
+    date: they are skipped silently and counted in
+    ``counter["headerless_rows"]`` exactly like the element-by-element pass
+    does. Every round stores its operation rows — dated or not — in *carry*
+    for the next round.
+    """
+    header_def = record_def["header"]
+    current_header = None
+    results = []
+    leading = []
+    round_rows = []
+    seen_header = False
+
+    for position, item in enumerate(snapshot):
+        if not isinstance(item, dict):
+            item = {}
+        index = item.get("index")
+        row_index = index if isinstance(index, int) and not isinstance(index, bool) else position
+        row_prefix = "%s[%d]" % (section_name, row_index)
+        fields = item.get("fields") or {}
+
+        if item.get("header"):
+            current_header = _record_from_snapshot(
+                fields, header_def, "%s.header" % row_prefix, warnings, now=now
+            )
+            round_rows.append({"key": _header_key(current_header), "header": current_header})
+            _remember_day_total(carry, current_header)
+            seen_header = True
+            continue
+        if not seen_header:
+            # Read the fields now — the overlap alignment needs their content
+            # key. The warnings are held back: a row that cannot be dated is
+            # skipped silently, exactly like before.
+            local_warnings = []
+            item_fields = _record_from_snapshot(
+                fields, record_def, row_prefix, local_warnings, now=now
+            )
+            key = _content_key(item_fields, record_def)
+            leading.append((row_prefix, item_fields, key, local_warnings))
+            round_rows.append({"key": ("O",) + tuple(key), "header": None})
+            continue
+
+        item_fields = _record_from_snapshot(fields, record_def, row_prefix, warnings, now=now)
+        results.append(_merge_row(current_header, item_fields, row_prefix, warnings))
+        round_rows.append(
+            {"key": ("O",) + tuple(_content_key(item_fields, record_def)), "header": current_header}
+        )
+
+    attribution = _align_leading(round_rows, (carry or {}).get("rows") or [], len(leading))
+    leading_results = []
+    if attribution is not None:
+        for row_prefix, item_fields, _key, local_warnings in leading:
+            warnings.extend(local_warnings)
+            leading_results.append(
+                _merge_row(attribution, item_fields, row_prefix, warnings)
+            )
+        for entry in round_rows[: len(leading)]:
+            entry["header"] = attribution
+    else:
+        _count_headerless(counter, leading, carry)
+    if carry is not None:
+        carry["rows"] = round_rows
+    return leading_results + results
 
 
 def _same_url(left, right):
@@ -351,20 +868,102 @@ def visit_record(page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TI
     return navigated
 
 
-def _extract_rows(page, record_def, section_name, warnings):
+def _extract_rows(
+    page, record_def, section_name, warnings, now=None, counter=None, carry=None
+):
     """Read the rows of a record as they are rendered right now.
 
     A record may hold ``items``: rows *inside* every row of the group. The
     fields of the group and of the item are merged into one output row — the
     item wins when both define the same field.
+
+    A record may hold ``header`` instead: the feed is flat, so ``row`` matches
+    both the day headers and the operations. A header row updates the current
+    header values and is not emitted; an operation row inherits them (the
+    operation wins on a clash). Operations before the first header of a pass
+    are aligned with the rows rendered in the previous round (see
+    ``_align_leading``); only when no overlap can be established do they have
+    no date — then they are skipped silently and counted in
+    ``counter["headerless_rows"]``.
+
+    When the page offers ``snapshot_rows`` and the record has both a ``row``
+    and a ``header``, the whole feed is read in one page-side pass in DOM
+    order. The element-by-element pass below stays as the fallback for a page
+    without that method; records without ``header`` always use it.
     """
-    rows = page.query_all(record_def["row"]) if record_def.get("row") else [page]
     items_def = record_def.get("items")
+    header_def = record_def.get("header")
+
+    if header_def and record_def.get("row"):
+        snapshot_rows = getattr(page, "snapshot_rows", None)
+        if snapshot_rows is not None:
+            snapshot = snapshot_rows(_snapshot_spec(record_def, header_def))
+            return _records_from_snapshot(
+                snapshot, record_def, section_name, warnings, now=now,
+                counter=counter, carry=carry,
+            )
+
+    rows = page.query_all(record_def["row"]) if record_def.get("row") else [page]
     results = []
+
+    if header_def:
+        current_header = None
+        seen_header = False
+        leading = []
+        round_rows = []
+        for row_index, row in enumerate(rows):
+            row_prefix = "%s[%d]" % (section_name, row_index)
+            try:
+                is_header = bool(row.query_all(header_def["selector"]))
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(
+                    "%s: header selector %r failed (%s)"
+                    % (row_prefix, header_def["selector"], exc)
+                )
+                is_header = False
+            if is_header:
+                current_header = extract_record(
+                    row, header_def, "%s.header" % row_prefix, warnings, now=now
+                )
+                round_rows.append({"key": _header_key(current_header), "header": current_header})
+                _remember_day_total(carry, current_header)
+                seen_header = True
+                continue
+            if not seen_header:
+                # Extracted here, not after the loop: the overlap alignment
+                # needs the content key of every leading row. The warnings
+                # are held back, so a row that cannot be dated stays silent.
+                local_warnings = []
+                item = extract_record(
+                    row, record_def, row_prefix, local_warnings, now=now
+                )
+                key = _content_key(item, record_def)
+                leading.append((row_prefix, item, key, local_warnings))
+                round_rows.append({"key": ("O",) + tuple(key), "header": None})
+                continue
+            item = extract_record(row, record_def, row_prefix, warnings, now=now)
+            results.append(_merge_row(current_header, item, row_prefix, warnings))
+            round_rows.append(
+                {"key": ("O",) + tuple(_content_key(item, record_def)), "header": current_header}
+            )
+
+        attribution = _align_leading(round_rows, (carry or {}).get("rows") or [], len(leading))
+        leading_results = []
+        if attribution is not None:
+            for row_prefix, item, _key, local_warnings in leading:
+                warnings.extend(local_warnings)
+                leading_results.append(_merge_row(attribution, item, row_prefix, warnings))
+            for entry in round_rows[: len(leading)]:
+                entry["header"] = attribution
+        else:
+            _count_headerless(counter, leading, carry)
+        if carry is not None:
+            carry["rows"] = round_rows
+        return leading_results + results
 
     for row_index, row in enumerate(rows):
         group_prefix = "%s[%d]" % (section_name, row_index)
-        group = extract_record(row, record_def, group_prefix, warnings)
+        group = extract_record(row, record_def, group_prefix, warnings, now=now)
 
         if not items_def:
             results.append(group)
@@ -381,6 +980,7 @@ def _extract_rows(page, record_def, section_name, warnings):
                 items_def,
                 "%s.items[%d]" % (group_prefix, item_index),
                 warnings,
+                now=now,
             )
             merged = dict(group)
             for name, value in item.items():
@@ -395,7 +995,18 @@ def _extract_rows(page, record_def, section_name, warnings):
     return results
 
 
-def _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=DEFAULT_TIMEOUT_MS):
+def _merge_counter(counter, attempt):
+    """Add the counts of a successful extraction attempt to *counter*."""
+    if counter is None:
+        return
+    for name, value in attempt.items():
+        counter[name] = counter.get(name, 0) + value
+
+
+def _extract_rows_stable(
+    page, record_def, section_name, warnings, timeout_ms=DEFAULT_TIMEOUT_MS, now=None,
+    counter=None, carry=None,
+):
     """Read the rows, retrying once when the DOM was torn by a navigation.
 
     A single ``query_all`` + ``text_content`` pass can fail while the cabinet
@@ -406,9 +1017,14 @@ def _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=DE
     is better reported than a lost run.
     """
     attempt_warnings = []
+    attempt_counter = {}
     try:
-        rows = _extract_rows(page, record_def, section_name, attempt_warnings)
+        rows = _extract_rows(
+            page, record_def, section_name, attempt_warnings, now=now,
+            counter=attempt_counter, carry=carry,
+        )
         warnings.extend(attempt_warnings)
+        _merge_counter(counter, attempt_counter)
         return rows
     except Exception:
         pass
@@ -423,12 +1039,17 @@ def _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=DE
         pass
 
     retry_warnings = []
+    retry_counter = {}
     try:
-        rows = _extract_rows(page, record_def, section_name, retry_warnings)
+        rows = _extract_rows(
+            page, record_def, section_name, retry_warnings, now=now,
+            counter=retry_counter, carry=carry,
+        )
     except Exception as exc:
         warnings.append("%s: extraction failed after 2 attempts (%s)" % (section_name, exc))
         return []
     warnings.extend(retry_warnings)
+    _merge_counter(counter, retry_counter)
     return rows
 
 
@@ -615,17 +1236,32 @@ def _foreign_load_more_count(page, record_def, load_more_scope, load_more_text):
     return max(total - clickable, 0)
 
 
-def _absorb_round(page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms):
+def _absorb_round(
+    page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms,
+    now=None, counter=None, carry=None,
+):
     """Read the list once and keep the rows that are new; return how many.
 
     *rows* and *seen* are updated in place. A row is kept when its key has
     not been kept that many times yet (two equal coffees are two rows); a row
     with no key at all is always kept.
+
+    A virtualised list drops rows from the DOM while it is scrolled: a round
+    may therefore see fewer rows than the previous one. Counting the rows of
+    *this round* against *seen* keeps that correct — a row that is still
+    rendered is simply skipped, and only the newly rendered ones are kept.
     """
     added = 0
     in_round = Counter()
     for row in _extract_rows_stable(
-        page, record_def, section_name, scrolled_warnings, timeout_ms=timeout_ms
+        page,
+        record_def,
+        section_name,
+        scrolled_warnings,
+        timeout_ms=timeout_ms,
+        now=now,
+        counter=counter,
+        carry=carry,
     ):
         key = _row_key(row)
         if any(key):
@@ -649,7 +1285,8 @@ def _scroll_limit_warning(warnings, section_name, rounds, rows):
 
 
 def _scroll_section(
-    page, record_def, section_name, warnings, rows, scroll_def, timeout_ms=DEFAULT_TIMEOUT_MS
+    page, record_def, section_name, warnings, rows, scroll_def,
+    timeout_ms=DEFAULT_TIMEOUT_MS, now=None, headerless=None, carry=None,
 ):
     """Scroll the rendered list and append the rows it newly shows.
 
@@ -666,9 +1303,18 @@ def _scroll_section(
     Returns ``(rows, info)``, where *info* says how many rounds were made,
     how many rows were collected in total, how many load-more clicks were
     made (always 0 when the feature is off), how many empty rounds found no
-    matching button in the list (``load_more_missing``) and why the scrolling
-    stopped.
+    matching button in the list (``load_more_missing``), how many operation
+    rows could not be dated at all and were therefore skipped
+    (``headerless_rows``) and why the scrolling stopped.
+
+    *carry* holds the operation rows of the previous round, with their dates,
+    so that the leading rows of the next round can be aligned with them (see
+    ``_align_leading``). It is created here when the caller did not provide
+    one and the record is a flat feed.
     """
+    counter = headerless if headerless is not None else {"headerless_rows": 0}
+    if carry is None and record_def.get("header"):
+        carry = {"rows": []}
     scroll_by = getattr(page, "scroll_by", None)
     if scroll_by is None:
         # The page cannot scroll — nothing is done, and it is said so.
@@ -679,6 +1325,7 @@ def _scroll_section(
             "oldest_date": _oldest_date(rows),
             "clicks": 0,
             "load_more_missing": 0,
+            "headerless_rows": counter["headerless_rows"],
         }
         _judge_completeness(warnings, section_name, info, scroll_def.get("stop_before_date"))
         return rows, info
@@ -716,7 +1363,8 @@ def _scroll_section(
             time.sleep(settle_ms / 1000.0)
 
         added = _absorb_round(
-            page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms
+            page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms,
+            now=now, counter=counter, carry=carry,
         )
 
         if _reached_date(rows, stop_before):
@@ -768,7 +1416,8 @@ def _scroll_section(
                 if settle_ms > 0:
                     time.sleep(settle_ms / 1000.0)
                 added = _absorb_round(
-                    page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms
+                    page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms,
+                    now=now, counter=counter, carry=carry,
                 )
                 if _reached_date(rows, stop_before):
                     stop = "date"
@@ -798,6 +1447,7 @@ def _scroll_section(
         "oldest_date": _oldest_date(rows),
         "clicks": clicks,
         "load_more_missing": load_more_missing,
+        "headerless_rows": counter["headerless_rows"],
     }
     _judge_completeness(warnings, section_name, info, stop_before)
 
@@ -829,24 +1479,36 @@ def _judge_completeness(warnings, section_name, info, stop_before):
     rendered the older rows yet; without this flag such a run would look
     like a complete history. Without *stop_before* only a list that stopped
     growing counts as complete. The round limit has a warning of its own.
+
+    Rows that could not be dated at all (``headerless_rows``) were silently
+    dropped from the output, so a run with any of them is never complete:
+    the warning says how many operations are missing and why.
     """
     stop = info["stop"]
     oldest = info.get("oldest_date")
     if stop == "date":
-        info["complete"] = True
-        return
-    if stop == "limit":
-        info["complete"] = False
-        return
-    if not stop_before:
-        info["complete"] = stop == "empty"
-        return
-    info["complete"] = oldest is not None and oldest <= stop_before
-    if not info["complete"]:
+        complete = True
+    elif stop == "limit":
+        complete = False
+    elif not stop_before:
+        complete = stop == "empty"
+    else:
+        complete = oldest is not None and oldest <= stop_before
+        if not complete:
+            warnings.append(
+                "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
+                % (section_name, oldest or "no dated row", stop_before, stop)
+            )
+
+    headerless = info.get("headerless_rows") or 0
+    if headerless:
         warnings.append(
-            "%s: history reaches back only to %s, not to %s (stop: %s, history may be incomplete)"
-            % (section_name, oldest or "no dated row", stop_before, stop)
+            "%s: at least %d operations could not be dated (their day header was not "
+            "rendered together with them) and were skipped"
+            % (section_name, headerless)
         )
+        complete = False
+    info["complete"] = complete
 
 
 def extract_section(
@@ -857,12 +1519,14 @@ def extract_section(
     visited=None,
     timeout_ms=DEFAULT_TIMEOUT_MS,
     scroll_info=None,
+    now=None,
 ):
     """Extract one section (``balances`` or ``transactions``) from *page*.
 
     A record may hold ``items``: rows *inside* every row of the group. The
     fields of the group and of the item are merged into one output row — the
-    item wins when both define the same field.
+    item wins when both define the same field. A record may carry ``header``
+    instead (a flat feed of sibling day headers and operations).
 
     A record may hold ``scroll``: the driver then scrolls the rendered list
     (read-only) and keeps the rows that appear while the list is scrolled.
@@ -871,13 +1535,41 @@ def extract_section(
     """
     visit_record(page, record_def, warnings, visited=visited, timeout_ms=timeout_ms)
 
-    results = _extract_rows_stable(page, record_def, section_name, warnings, timeout_ms=timeout_ms)
-
+    headerless = {"headerless_rows": 0}
     scroll_def = record_def.get("scroll")
+    # The operation rows (with their dates) travel from one pass into the
+    # next, so an operation whose header already left a virtualised DOM can
+    # still be dated by its overlap with the previous rendered window.
+    # Without scrolling there is no later round to carry them into, and the
+    # single pass behaves as it always did.
+    carry = {"rows": []} if scroll_def and record_def.get("header") else None
+    results = _extract_rows_stable(
+        page, record_def, section_name, warnings, timeout_ms=timeout_ms,
+        now=now, counter=headerless, carry=carry,
+    )
+
     if scroll_def:
         results, info = _scroll_section(
-            page, record_def, section_name, warnings, results, scroll_def, timeout_ms=timeout_ms
+            page, record_def, section_name, warnings, results, scroll_def,
+            timeout_ms=timeout_ms, now=now, headerless=headerless, carry=carry,
         )
+        short = _short_days(
+            results, (carry or {}).get("day_totals"), scroll_def.get("stop_before_date")
+        )
+        if short:
+            info["short_days"] = len(short)
+            info["complete"] = False
+            for date, got, expected in short[:_SCROLL_WARNING_LIMIT]:
+                warnings.append(
+                    "%s: %s: collected expenses %s are below the cabinet's day total %s "
+                    "(an operation was lost or dated by another day)"
+                    % (section_name, date, got, expected)
+                )
+            if len(short) > _SCROLL_WARNING_LIMIT:
+                warnings.append(
+                    "%s: %d more days are short of their day total"
+                    % (section_name, len(short) - _SCROLL_WARNING_LIMIT)
+                )
         if scroll_info is not None:
             scroll_info.update(info)
 
@@ -893,15 +1585,30 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     When a record asked for scrolling, the dict also holds a ``scroll`` key
     (``{"rounds": N, "rows": M, "stop": "limit"|"empty"|"date"|"error"|
     "no-scroll", "oldest_date": "YYYY-MM-DD"|None, "clicks": K,
-    "load_more_missing": E, "complete": bool}``) that tells how the scroll
-    ended, how far back it reached, how many load-more clicks it made, how
-    many empty rounds found no matching button in the list container and
-    whether that is the whole history the profile asked for.
+    "load_more_missing": E, "headerless_rows": H, "complete": bool}``) that
+    tells how the scroll ended, how far back it reached, how many load-more
+    clicks it made, how many empty rounds found no matching button in the
+    list container, how many operation rows could not be dated at all and
+    were therefore skipped (``headerless_rows``, a virtualised flat feed with
+    no reliable overlap between rounds) and whether that is the whole history
+    the profile asked for.
+
+    *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
+    relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field
+    option. The latter are resolved on the cabinet's calendar day: the
+    profile's optional ``timezone`` (an IANA name, ``Europe/Moscow`` by
+    default), not UTC.
     """
     warnings = []
     url = profile["url"]
     visited = []
     scroll_sections = {}
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if isinstance(now, datetime) and now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local_now = _local_now(now, profile, warnings)
 
     try:
         page.goto(url)
@@ -928,6 +1635,7 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
                 visited=visited,
                 timeout_ms=timeout_ms,
                 scroll_info=info,
+                now=local_now,
             )
         )
         if info:
@@ -945,6 +1653,7 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
                 visited=visited,
                 timeout_ms=timeout_ms,
                 scroll_info=info,
+                now=local_now,
             )
         )
         if info:
@@ -955,11 +1664,12 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     if not transactions:
         warnings.append("no transactions extracted")
 
-    if now is None:
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc)
-    fetched_at = now.isoformat().replace("+00:00", "Z")
+    # ``fetched_at`` stays the UTC instant whatever the cabinet's timezone is.
+    if isinstance(now, datetime):
+        instant = now.astimezone(timezone.utc)
+    else:
+        instant = now
+    fetched_at = instant.isoformat().replace("+00:00", "Z")
 
     result = {
         "bank": profile.get("bank"),

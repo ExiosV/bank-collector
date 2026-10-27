@@ -7,6 +7,8 @@ so this module implements the small part of the DOM that
 * ``goto(url)``
 * ``wait_for_selector(selector, timeout=...)``
 * ``query_all(selector)``
+* ``snapshot_rows(spec)`` -- one pass over a flat feed, like the real page's
+  JS, returning the rows in DOM order
 * ``content()`` / ``inner_text(selector)``
 * ``scroll_by(dy)`` -- read-only: it only moves the viewport
 * a ``click()`` hook: ``on_click(page, element)`` is called when a test
@@ -326,7 +328,7 @@ _SELECTOR_CACHE = {}
 
 
 def _split_selector_list(selector):
-    """Split a comma-separated selector list on its top-level commas.
+    """Split a comma-separated selector list on its outermost commas.
 
     Commas inside ``[...]``, ``(...)`` or quotes belong to one selector and
     are left alone.
@@ -488,6 +490,9 @@ class FakePage(object):
         #: Every scroll the driver asked for, in order: ("scroll", dy).
         #: Scrolling is not a write, so it has its own log (see ``writes``).
         self.scrolls = []
+        #: Every spec passed to ``snapshot_rows``, in order.  One call per
+        #: extraction is what the collector promises; the tests count them.
+        self.snapshot_calls = []
         self._pages = list(pages or [])
         self._on_scroll = on_scroll
         self._on_click = on_click
@@ -517,6 +522,53 @@ class FakePage(object):
 
     def query_all(self, selector):
         return self.root.query_all(selector)
+
+    @staticmethod
+    def _snapshot_field(row, field):
+        """Read one field of *row* the way the page-side JS reads it."""
+        try:
+            matches = row.query_all(field["selector"])
+        except Exception:  # pragma: no cover - the fake selectors do not throw
+            return {"found": False, "text": None}
+        if not matches:
+            return {"found": False, "text": None}
+        element = matches[0]
+        attr = field.get("attr")
+        if attr:
+            return {"found": True, "text": element.get_attribute(attr)}
+        return {"found": True, "text": element.text_content()}
+
+    def snapshot_rows(self, spec):
+        """Read a flat feed in one pass, like the real page's JS does.
+
+        The result has the same shape as ``PageAdapter.snapshot_rows``:
+        ``{"index", "header", "fields"}`` per row, in DOM order.  A
+        header row carries ``header_fields``, an operation row ``fields``.
+        Every call is logged in ``snapshot_calls`` so a test can prove that
+        one extraction makes exactly one pass.
+        """
+        self.snapshot_calls.append(spec)
+        if spec.get("row"):
+            rows = self.root.query_all(spec["row"])
+        else:
+            rows = [self.root]
+
+        results = []
+        for index, row in enumerate(rows):
+            header = bool(row.query_all(spec["header_selector"]))
+            fields_spec = (spec.get("header_fields") if header else spec.get("fields")) or {}
+            fields = {
+                name: self._snapshot_field(row, field)
+                for name, field in fields_spec.items()
+            }
+            results.append(
+                {
+                    "index": index,
+                    "header": header,
+                    "fields": fields,
+                }
+            )
+        return results
 
     def scroll_by(self, dy):
         """Pretend to scroll the viewport by *dy* pixels.

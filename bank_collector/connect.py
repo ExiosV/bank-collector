@@ -106,6 +106,45 @@ def redact_url(text, url=None):
         text = regex.sub(repl, text)
     return text
 
+#: One read-only pass over a flat feed (day headers and operations are sibling
+#: rows). It walks the DOM once and returns, per row, its DOM index,
+#: whether it is a header and the raw text of its fields: a header row carries
+#: ``spec.header_fields``, every other row carries ``spec.fields``. Nothing is
+#: clicked, focused, scrolled or written — only ``querySelector``,
+#: ``textContent`` and ``getAttribute`` are used.
+#: ``regex``/``group``/``parse``/``optional`` are applied in Python afterwards.
+SNAPSHOT_ROWS_JS = """
+(spec) => {
+  const read = (row, fields) => {
+    const out = {};
+    for (const name of Object.keys(fields || {})) {
+      const field = fields[name];
+      let found = false;
+      let text = null;
+      try {
+        const el = row.querySelector(field.selector);
+        if (el) {
+          found = true;
+          text = field.attr ? el.getAttribute(field.attr) : el.textContent;
+        }
+      } catch (err) {}
+      out[name] = {found: found, text: text};
+    }
+    return out;
+  };
+  return Array.from(document.querySelectorAll(spec.row)).map((row, index) => {
+    let header = false;
+    try {
+      header = row.querySelector(spec.header_selector) !== null;
+    } catch (err) {}
+    return {
+      index: index,
+      header: header,
+      fields: read(row, header ? spec.header_fields : spec.fields),
+    };
+  });
+}
+"""
 
 # Navigation is the only slow part: an SPA cabinet can take a while to answer.
 GOTO_TIMEOUT_MS = 60000
@@ -250,6 +289,10 @@ class FrameAdapter(object):
     def query_all(self, selector):
         return [ElementAdapter(handle) for handle in self._frame.query_selector_all(selector)]
 
+    def snapshot_rows(self, spec):
+        """Read every row of a flat feed in one read-only pass inside the frame."""
+        return self._frame.evaluate(SNAPSHOT_ROWS_JS, spec)
+
     def text_content(self):
         try:
             return self._frame.inner_text("body")
@@ -294,6 +337,17 @@ class PageAdapter(object):
 
     def query_all(self, selector):
         return [ElementAdapter(handle) for handle in self._page.query_selector_all(selector)]
+
+    def snapshot_rows(self, spec):
+        """Read every row of a flat feed in ONE read-only page-side pass.
+
+        *spec* holds only selectors and attributes (``row``,
+        ``header_selector``, ``header_fields``, ``fields``); the page walks
+        the DOM once and returns, per row, its ``index``, whether it is a header and the raw text of the fields that
+        apply to it. One round trip instead of ``query_all`` +
+        ``text_content`` per row over a remote CDP relay.
+        """
+        return self._page.evaluate(SNAPSHOT_ROWS_JS, spec)
 
     def scroll_by(self, dy):
         """Scroll the viewport by *dy* pixels.

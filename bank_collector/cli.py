@@ -44,16 +44,15 @@ import time
 
 from . import __version__, report as report_mod
 from .collect import DEFAULT_TIMEOUT_MS, collect
-from .connect import DEFAULT_CDP_URL, BrowserUnavailable, PageAdapter, connect
+from .connect import (
+    CDP_URL_ENV,
+    DEFAULT_CDP_URL,
+    BrowserUnavailable,
+    PageAdapter,
+    connect,
+    resolve_cdp_url,
+)
 
-#: The environment variable that may hold the CDP URL (a relay URL carries a
-#: token, which must not sit on the command line).
-CDP_URL_ENV = "BANK_COLLECTOR_CDP_URL"
-
-
-def _cdp_url(args):
-    """The CDP URL: ``--cdp-url``, else ``$BANK_COLLECTOR_CDP_URL``, else the default."""
-    return args.cdp_url or os.environ.get(CDP_URL_ENV) or DEFAULT_CDP_URL
 from .profiles import ProfileError, list_profiles, load_profile
 from .sanitize import sanitize_html, sanitize_text
 from .unlock import (
@@ -113,7 +112,7 @@ def build_parser():
             "CDP endpoint of the browser you started yourself (default: $%s, "
             "else %s). A playwriter relay URL is accepted too; prefer the "
             "environment variable when the URL carries a token, so it does not "
-            "show up in the process list." % (CDP_URL_ENV, DEFAULT_CDP_URL)
+            "show up in argv or in shell history." % (CDP_URL_ENV, DEFAULT_CDP_URL)
         ),
     )
     parser.add_argument(
@@ -509,6 +508,9 @@ def _import_statement(args):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cdp_url is not None and not args.cdp_url.strip():
+        # An empty --cdp-url "$CDP" in a script must not fall through silently.
+        parser.error("--cdp-url is empty")
 
     if args.list_profiles:
         _print_profiles()
@@ -547,7 +549,7 @@ def main(argv=None):
         profile = _without_scroll(profile)
 
     try:
-        playwright, browser = connect(_cdp_url(args), timeout_ms=args.timeout)
+        playwright, browser = connect(resolve_cdp_url(args.cdp_url), timeout_ms=args.timeout)
     except BrowserUnavailable as exc:
         sys.stderr.write("browser error: %s\n" % exc)
         return EXIT_NO_BROWSER

@@ -215,7 +215,7 @@ def _ops(count, title="Магазин", amount="−900 ₽"):
 def test_raif_profile_loads_and_names_the_pagination():
     profile = load_profile("raif")
 
-    assert profile["status"] == "unverified", "no live run has been made yet"
+    assert profile["status"] == "verified"
     assert profile["url"] == HOME_URL
     assert profile["timezone"] == "Europe/Moscow"
 

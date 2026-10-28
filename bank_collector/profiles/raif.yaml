@@ -1,0 +1,117 @@
+# Raiffeisenbank (online.raiffeisen.ru) — read-only profile, written from an
+# anonymised DOM snapshot on 2026-10-28; run live on 2026-10-28 (code
+# e812250, before the review fixes of this PR); the numbers have not been
+# compared with the cabinet yet.
+#
+# Live run complete (590 ops, 59 pages, stop date, 0 warnings); numbers not
+# yet compared with the cabinet — status unverified.
+#
+# Two pages: the home page holds the product balances, /history/common holds
+# the operations. The history is NOT an endless list and it is NOT scrolled:
+# it shows 10 operations per page, the whole list is replaced when the
+# pagination arrow is pressed, and the URL never changes. That is what the
+# `pages` block describes.
+#
+# History markup (anonymised):
+#
+#   li.transaction-group-list__item            one day
+#     h5.transaction-group-list__item__title   "24 октября, суббота"
+#     ul.transaction-list
+#       li.transaction-list__item              one operation
+#         p.transaction-list__item-title
+#         transaction-list-amount
+#           div.transaction-list-amount
+#             div                                amount (income: ..._success)
+#             div.transaction-list-amount__cashback
+#
+# A day can be split across two pages: the same header appears on both.
+# Pagination:
+#
+#   nav.pagination > div.pagination__pages
+#     button.pagination__item_arrow (disabled)   left arrow
+#     button.pagination__item_active             the current page number
+#     button.pagination__item                    another page
+#     button.pagination__item_arrow              right arrow ("next page")
+#
+# On the last page the right arrow carries `disabled` — the list's own
+# definitive end of history.
+#
+# `pages.next_selector` names the right arrow only (`:last-child` of the
+# pages container). The driver presses it and nothing else: an arrow that is
+# missing or matches more than one element is never clicked, a disabled one
+# ends the run as complete, and the current page number
+# (`pages.active_selector`) must move to the next number together with a
+# fresh batch of rows. Every page followed by another one must hold exactly
+# page_size = 10 operations; a shorter intermediate page or a newer page
+# above an older one makes the run incomplete (exit code 5), so it can never
+# overwrite a fuller snapshot. No statement is downloaded and no request of
+# our own is sent.
+#
+# Raiffeisen shows currencies as ₽, $ and ¥. `parse_money` maps ¥ to JPY, but
+# in this cabinet ¥ is the yuan (CNY): the currency of such an amount is
+# reported as JPY. That is a known limitation of the money parser, not fixed
+# here; check `amount.currency` before summing yuan operations.
+#
+# NOTE: The Raiffeisen web session expires after about 20-25 minutes without
+# activity (observed twice on 2026-10-28). Start the run right after a manual
+# login; a full run takes ~22 minutes of continuous activity. If the session
+# dies mid-run the page stops advancing, the run ends with an error and exit 5,
+# and it never overwrites a fuller snapshot. An unattended night run will not
+# work — it must run while the owner is logged in.
+#
+# NOTE: Raiffeisen provides no category, no description/MCC, no card or account
+# attribution per operation. The `cashback` field is a separate optional field
+# (the bonus shown under the amount), NOT included in `amount`. Own transfers
+# between the owner's Raiffeisen accounts cannot be distinguished (no category,
+# no account), so they appear as both an expense and an income in a
+# consolidated P&L.
+bank: raif
+status: unverified
+notes: "Written from an anonymised DOM snapshot on 2026-10-28 and run on a live cabinet on 2026-10-28 (~10:01-10:23 MSK, devicex2 desktop Chrome, logged-in cabinet; 1292 s; exit 0; no warnings). Live run complete (590 ops, 59 pages, stop date, no warnings); numbers not yet compared with the cabinet — status unverified. Scroll block: mode pages, pages 59, clicks 58, rows 590, stop date, oldest_date 2025-12-31, headerless_rows 0, complete true. Dates monotonic non-increasing across all 590 rows; 0 rows with empty date, amount or title; all amounts RUB; 152 rows carry a non-empty cashback. Page 1 and a structural probe before the profile match exactly (day counts, 10 ops/page, day headers repeat across page boundaries). Operations per month: 2025-12: 2, 2026-01: 53, 02: 56, 03: 69, 04: 81, 05: 40, 06: 22, 07: 24, 08: 88, 09: 134, 10: 21 (2025-12 and 2026-10 partial; October ends at the newest operation shown on 2026-10-24, not at the run date). Balances: 6 product cards read; currencies shown RUB, USD and ¥ (reported as JPY — the known caveat stays); the 20-digit account number is stripped from names. Completeness rests on page integrity checks (every followed page held exactly 10 ops, no page newer than the one before, page number advanced by one on every click). The list shows no day/month totals, so no independent sum exists on it: a numeric check could be a balance reconciliation (balance now against a later balance minus the operations between them) or monthly totals from a statement or another cabinet page; until it is made the profile stays unverified, possibly for a long time. The live run used e812250, the code before this PR's review fixes: the page-number anchor, row-based advance detection, the no-digit click guard, the zero-row error and the first-page re-check have not been run against a live cabinet yet (tests only). Each can only stop a run with an error or mark it incomplete, never make an incomplete run complete. A live re-run of the PR head is pending (it needs the owner's login). Operational finding: the Raiffeisen web session expires after about 20-25 minutes of inactivity (observed twice on 2026-10-28: a run at ~00:55 MSK, about 20 minutes after the last read-only probe in the same session, was redirected to /login/main and extracted nothing, exit 4; a read at 10:47 MSK, 24 minutes after the last activity at 10:23, met /login/main). An unattended night run will not work — it must run while the owner is logged in; a full run takes ~22 minutes of continuous activity."
+url: "https://online.raiffeisen.ru/"
+wait_for: ".home-product-list-item"
+timezone: Europe/Moscow
+
+balances:
+  - row: ".home-product-list-item"
+    fields:
+      # "Текущий счёт 40817810000000000000" -> "Текущий счёт"; a name without
+      # a trailing run of 10+ digits ("Вклад «Пример»") stays whole.
+      product:
+        selector: ".home-product-list-item__text-title"
+        regex: '^(.*?)(?:\s*\d{10,})?\s*$'
+        group: 1
+      amount:
+        selector: ".home-product-list-item__text-amount amount"
+
+transactions:
+  - url: "https://online.raiffeisen.ru/history/common"
+    wait_for: ".transaction-list__item"
+    # One day, split across pages when needed: the same header then repeats.
+    row: ".transaction-group-list__item"
+    fields:
+      date:
+        selector: ".transaction-group-list__item__title"
+        # "24 октября, суббота" -> 2026-10-24 (the weekday is ignored).
+        parse: ru_date
+    items:
+      row: ".transaction-list__item"
+      fields:
+        title:
+          selector: ".transaction-list__item-title"
+        # The first div is the signed amount ("−900 ₽", income "+13 000 ₽").
+        amount:
+          selector: ".transaction-list-amount > div:first-child"
+        # Most operations show no cashback at all: an empty div must stay silent.
+        cashback:
+          selector: ".transaction-list-amount__cashback"
+          optional: true
+    # 10 operations per page, the whole list is replaced, the URL is unchanged.
+    pages:
+      next_selector: "nav.pagination .pagination__pages > button.pagination__item_arrow:last-child"
+      active_selector: "nav.pagination button.pagination__item_active"
+      page_size: 10
+      settle_ms: 800
+      wait_ms: 15000
+      max_pages: 400
+      stop_before_date: "2026-01-01"

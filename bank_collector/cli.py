@@ -8,9 +8,10 @@ Exit codes
     is missing or readable by other users
 4   the page was read but nothing could be extracted (warning is printed), or
     an imported statement export holds no operations at all
-5   the history is incomplete: the scroll did not reach ``stop_before_date``
-    (or hit ``max_rounds``), or a fuller snapshot on disk was kept and the
-    new report went to ``<bank>.partial.json`` — not a success either way
+5   the history is incomplete: the scroll or the numbered pages did not
+    reach ``stop_before_date`` (or hit ``max_rounds``/``max_pages``), or a
+    fuller snapshot on disk was kept and the new report went to
+    ``<bank>.partial.json`` — not a success either way
 
 ``--import-statement PATH`` reads a statement the owner downloaded by hand
 from the cabinet. It needs ``--bank`` and no browser: the file is read from
@@ -86,12 +87,15 @@ def build_parser():
             "Read your own bank cabinet in a browser you already logged into. "
             "Read-only: no login and no credentials; the only fill is --enter-code's "
             "answer to the cabinet's static 'secret code' screen (not an SMS code), "
-            "from a file of mode 0600. There are exactly two narrow, explicitly "
+            "from a file of mode 0600. There are exactly three narrow, explicitly "
             "enabled clicks: the history list's own 'load more' button — a profile "
             "may name it (scroll.load_more_text) together with the list container it "
             "lives in (scroll.load_more_scope), and it is pressed only when scrolling "
-            "added no rows and exactly one such <button> is inside that container — "
-            "and --enter-code's one press of the screen's submit button."
+            "added no rows and exactly one such <button> is inside that container; "
+            "the history's own 'next page' arrow (pages.next_selector) of a list cut "
+            "into numbered pages — it is the only element clicked in that mode and "
+            "only when it resolves to exactly one element; and --enter-code's one "
+            "press of the screen's submit button."
         ),
         epilog=(
             "Examples:\n"
@@ -166,7 +170,8 @@ def build_parser():
         action="store_true",
         help=(
             "do not scroll the rendered list, even when the profile asks for it "
-            "(the first rendered screen only; nothing else changes)"
+            "(the first rendered screen only; does not stop a pages walk; "
+            "remove the pages block from the profile to read only the first page)"
         ),
     )
     parser.add_argument(
@@ -214,7 +219,7 @@ def _print_profiles(stream=sys.stdout):
 
 
 def _incomplete(report):
-    """True when the report scrolled but did not reach the whole history."""
+    """True when the report read a list (scroll or pages) but not all of it."""
     scroll = report.get("scroll")
     return bool(scroll) and not scroll.get("complete")
 
@@ -224,8 +229,9 @@ def _would_lose_history(report, path):
 
     A run that is not proven complete must not overwrite yesterday's longer
     history: the daily job would trade a year for a screen. That covers a
-    scroll that stopped short, a ``--no-scroll`` run over a file that was
-    scrolled, and a run without transactions. A complete run always wins,
+    list that stopped short (a scroll or a numbered-page walk), a
+    ``--no-scroll`` run over a file that was scrolled, and a run without
+    transactions. A complete run always wins,
     and a bank without scrolling (its count of rows changes every day) is
     never held back.
     """
@@ -317,24 +323,29 @@ def _without_scroll(profile):
 
 
 class _AlreadyOpenPage(object):
-    """A page proxy whose ``goto`` of the already open URL does nothing.
+    """A page proxy that swallows the first ``goto`` of the already open URL.
 
     ``collect()`` opens the cabinet itself.  After the unlock the cabinet is
-    already there, and a second ``goto`` would reload the page — which would
+    already there, and that first ``goto`` would reload the page — which would
     throw the freshly unlocked session away.  This proxy swallows exactly
-    that one call and passes everything else through.
+    that one call and lets every later ``goto`` through: the first-page
+    recheck of a paginated run (and any record on the profile's own URL) must
+    really navigate, or it would re-read the last page and always report the
+    first page as changed.
     """
 
     def __init__(self, page, url):
         self._page = page
         self._url = url
+        self._swallowed = False
 
     @property
     def url(self):
         return getattr(self._page, "url", self._url)
 
     def goto(self, url, *args, **kwargs):
-        if _same_url(url, self._url):
+        if not self._swallowed and _same_url(url, self._url):
+            self._swallowed = True
             return None
         return self._page.goto(url, *args, **kwargs)
 

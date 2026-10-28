@@ -28,6 +28,8 @@ here covers what the shipped profiles use:
   another one (``div:has(> [data-date]):has(> button)``).
 * ``:not(<inner>)``: the element does NOT match the inner compound selector
   (``button:not([data-test-id])``). Only a plain compound is supported inside.
+* ``:first-child`` / ``:last-child``: the element is the first/last *element*
+  child of its parent, as in the browser (text nodes are not children here).
 * a selector list separated by commas (``button, [role=button], a``):
   an element matches when it matches any group.
 
@@ -123,14 +125,23 @@ class _Builder(HTMLParser):
         self.root = FakeElement("#document")
         self.stack = [self.root]
 
+    @staticmethod
+    def _attrs(attrs):
+        """Like the DOM: a valueless boolean attribute reads back as ``""``.
+
+        ``get_attribute("disabled")`` is ``""`` (not ``None``) in Chrome, so a
+        test can tell a disabled control from one without the attribute.
+        """
+        return {name: "" if value is None else value for name, value in attrs}
+
     def handle_starttag(self, tag, attrs):
-        element = FakeElement(tag, dict(attrs))
+        element = FakeElement(tag, self._attrs(attrs))
         self.stack[-1].append_child(element)
         if tag not in VOID_TAGS:
             self.stack.append(element)
 
     def handle_startendtag(self, tag, attrs):
-        element = FakeElement(tag, dict(attrs))
+        element = FakeElement(tag, self._attrs(attrs))
         self.stack[-1].append_child(element)
 
     def handle_endtag(self, tag):
@@ -156,15 +167,17 @@ def parse_html(html):
 # ---------------------------------------------------------------------------
 
 _TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]*")
-_NAME_RE = re.compile(r"[^\s~^$*|=]+")
+#: A class/id name stops where the next compound part starts (``.a:p`` is the
+#: class ``a`` followed by the pseudo-class ``p``, not one class ``a:p``).
+_NAME_RE = re.compile(r"[^\s~^$*|=:.\[(>]+")
 _ATTR_RE = re.compile(r"\s*([^\s~^$*|=]+)\s*(.*)$", re.S)
 _OP_RE = re.compile(r"\s*(~=|\|=|\^=|\$=|\*=|=)\s*(.*)$", re.S)
 
 
 class _Compound(object):
-    """One compound selector: a tag plus classes, id, attributes, :has(), :not()."""
+    """One compound selector: tag, classes, id, attributes and pseudo-classes."""
 
-    __slots__ = ("tag", "classes", "ids", "attrs", "has", "nots")
+    __slots__ = ("tag", "classes", "ids", "attrs", "has", "nots", "first_child", "last_child")
 
     def __init__(self):
         self.tag = None
@@ -173,6 +186,8 @@ class _Compound(object):
         self.attrs = []
         self.has = []
         self.nots = []
+        self.first_child = False
+        self.last_child = False
 
 
 def _find_closing(text, start, opener, closer):
@@ -254,7 +269,11 @@ def _parse_compound(text):
                 break
             name = name_match.group(0).lower()
             index = name_match.end()
-            if name == "has":
+            if name == "first-child":
+                compound.first_child = True
+            elif name == "last-child":
+                compound.last_child = True
+            elif name == "has":
                 after = _find_closing(text, index, "(", ")")
                 inner = text[index + 1 : after - 1 if text[after - 1 : after] == ")" else after]
                 compound.has.append(_parse_steps(inner))
@@ -376,6 +395,13 @@ def _matches_compound(element, compound):
 
     if compound.ids and element.attrs.get("id") not in compound.ids:
         return False
+
+    if compound.first_child or compound.last_child:
+        siblings = element.parent.children if element.parent is not None else []
+        if compound.first_child and (not siblings or siblings[0] is not element):
+            return False
+        if compound.last_child and (not siblings or siblings[-1] is not element):
+            return False
 
     for name, operator, value in compound.attrs:
         actual = element.attrs.get(name)

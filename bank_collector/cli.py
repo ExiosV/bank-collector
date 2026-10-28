@@ -475,9 +475,11 @@ def _exit_code(report, written, kept, stream=None, signed_out=None):
     """The exit code of a finished run, with the line that explains it.
 
     The daily job trusts only this code: anything but 0 is retried and then
-    reported, and only a 0 is uploaded. The order matters — a run that met the
-    sign-in screen is ``EXIT_SIGNED_OUT`` even when a fuller file was kept,
-    and an empty run is ``EXIT_NOTHING`` even when a fuller file was kept.
+    reported, and only a 0 is uploaded. An empty run is ``EXIT_NOTHING`` even
+    when a fuller file was kept. The ``signed_out`` branch below is defensive:
+    ``main()`` returns ``EXIT_SIGNED_OUT`` itself, after the run stops and
+    before ``_write_outputs`` is called, so from ``main()`` this branch is
+    never reached.
     """
     stream = stream or sys.stderr
     if kept:

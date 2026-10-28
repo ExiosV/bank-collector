@@ -540,7 +540,7 @@ def test_the_text_marker_is_read_about_once_a_second(monkeypatch):
     status = check_session(page, _marker_profile(), timeout_ms=2500)
 
     assert status == "unknown"
-    # Once immediately and once per ~1 s: t=0, t=1.0 and t=2.5, not ten times.
+    # Once immediately and once per ~1 s: t=0, t=1.0 and t=2.0, not ten times.
     assert page.text_reads == 3
 
 

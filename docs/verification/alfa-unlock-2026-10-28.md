@@ -5,7 +5,9 @@ Aggregate evidence only: no code, no operation titles, names, amounts or account
 **The scheduled run on devicex2 entered the static «Секретный код» end to end on the live
 cabinet.** That is what `unlock.status: verified` in `alfa.yaml` means (see
 `docs/ADD_A_BANK.md`, "Переключите статус"): the screen was recognised, one code was typed,
-the cabinet opened, the report was written and uploaded, and the process exited 0. The
+the cabinet opened, the report was written, and the process exited 0. The upload of that report
+was done by the owner's devicex2 scheduler wrapper (the exiosv-lab-dev-config job), not by
+bank-collector: bank-collector itself sends nothing anywhere (see `docs/SECURITY.md`:90). The
 top-level profile status (`verified`) still means the numbers were checked against the
 cabinet; the unlock status only covers the code entry.
 
@@ -25,7 +27,8 @@ cabinet; the unlock status only covers the code entry.
   the code was filled, the submit button was pressed and `success_wait` (the dashboard) then
   appeared.
 - The report exists and is non-empty (30215 bytes), so the run went on to read the cabinet
-  after the unlock; the upload of that report exited 0.
+  after the unlock; the upload of that report exited 0. That upload was done by the owner's
+  devicex2 scheduler wrapper (the exiosv-lab-dev-config job), not by bank-collector.
 - The code itself, and every amount in the report, is deliberately not reproduced here.
 
 ## What this does not cover

@@ -1,6 +1,9 @@
 # Raiffeisenbank (online.raiffeisen.ru) — read-only profile, written from an
 # anonymised DOM snapshot on 2026-10-28 and verified on a live cabinet on
-# 2026-10-28: status: verified.
+# 2026-10-28.
+#
+# Live run complete (590 ops, 59 pages, stop date, 0 warnings); numeric
+# cross-check against the cabinet pending — status unverified.
 #
 # Two pages: the home page holds the product balances, /history/common holds
 # the operations. The history is NOT an endless list and it is NOT scrolled:
@@ -47,9 +50,23 @@
 # in this cabinet ¥ is the yuan (CNY): the currency of such an amount is
 # reported as JPY. That is a known limitation of the money parser, not fixed
 # here; check `amount.currency` before summing yuan operations.
+#
+# NOTE: The Raiffeisen web session expires after about 20-25 minutes without
+# activity (observed twice on 2026-10-28). Start the run right after a manual
+# login; a full run takes ~22 minutes of continuous activity. If the session
+# dies mid-run the page stops advancing, the run ends with an error and exit 5,
+# and it never overwrites a fuller snapshot. An unattended night run will not
+# work — it must run while the owner is logged in.
+#
+# NOTE: Raiffeisen provides no category, no description/MCC, no card or account
+# attribution per operation. The `cashback` field is a separate optional field
+# (the bonus shown under the amount), NOT included in `amount`. Own transfers
+# between the owner's Raiffeisen accounts cannot be distinguished (no category,
+# no account), so they appear as both an expense and an income in a
+# consolidated P&L.
 bank: raif
-status: verified
-notes: "Written from an anonymised DOM snapshot on 2026-10-28 and verified on a live cabinet on 2026-10-28 (~10:01-10:23 MSK, devicex2 desktop Chrome, logged-in cabinet; 1292 s; exit 0; no warnings). Scroll block: mode pages, pages 59, clicks 58, rows 590, stop date, oldest_date 2025-12-31, headerless_rows 0, complete true. Dates monotonic non-increasing across all 590 rows; 0 rows with empty date, amount or title; all amounts RUB; 152 rows carry a non-empty cashback. Page 1 and a structural probe before the profile match exactly (day counts, 10 ops/page, day headers repeat across page boundaries). Operations per month: 2025-12: 2, 2026-01: 53, 02: 56, 03: 69, 04: 81, 05: 40, 06: 22, 07: 24, 08: 88, 09: 134, 10: 21 (2025-12 and 2026-10 partial). Balances: 6 product cards read; currencies shown RUB, USD and ¥ (reported as JPY — the known caveat stays); the 20-digit account number is stripped from names. Completeness rests on page integrity checks (every followed page held exactly 10 ops, no page newer than the one before, page number advanced by one on every click; no day/month totals shown in the cabinet for independent sum comparison). Operational finding: the Raiffeisen web session expires after well under an hour of inactivity (a run at ~00:55 MSK, about 20 minutes after the last read-only probe in the same session, was redirected to /login/main and extracted nothing, exit 4); an unattended night run will not work — it must run while the owner is logged in."
+status: unverified
+notes: "Written from an anonymised DOM snapshot on 2026-10-28 and run on a live cabinet on 2026-10-28 (~10:01-10:23 MSK, devicex2 desktop Chrome, logged-in cabinet; 1292 s; exit 0; no warnings). Live run complete (590 ops, 59 pages, stop date, no warnings); numeric cross-check against the cabinet pending — status unverified. Scroll block: mode pages, pages 59, clicks 58, rows 590, stop date, oldest_date 2025-12-31, headerless_rows 0, complete true. Dates monotonic non-increasing across all 590 rows; 0 rows with empty date, amount or title; all amounts RUB; 152 rows carry a non-empty cashback. Page 1 and a structural probe before the profile match exactly (day counts, 10 ops/page, day headers repeat across page boundaries). Operations per month: 2025-12: 2, 2026-01: 53, 02: 56, 03: 69, 04: 81, 05: 40, 06: 22, 07: 24, 08: 88, 09: 134, 10: 21 (2025-12 and 2026-10 partial; October ends at the newest operation shown on 2026-10-24, not at the run date). Balances: 6 product cards read; currencies shown RUB, USD and ¥ (reported as JPY — the known caveat stays); the 20-digit account number is stripped from names. Completeness rests on page integrity checks (every followed page held exactly 10 ops, no page newer than the one before, page number advanced by one on every click; no day/month totals shown in the cabinet for independent sum comparison). The page-1 re-check (comparing the first page at the start and at the end of the run) is new in this round and was not run live. Operational finding: the Raiffeisen web session expires after about 20-25 minutes of inactivity (observed twice on 2026-10-28: a run at ~00:55 MSK, about 20 minutes after the last read-only probe in the same session, was redirected to /login/main and extracted nothing, exit 4; a read at 10:47 MSK, 24 minutes after the last activity at 10:23, met /login/main). An unattended night run will not work — it must run while the owner is logged in; a full run takes ~22 minutes of continuous activity."
 url: "https://online.raiffeisen.ru/"
 wait_for: ".home-product-list-item"
 timezone: Europe/Moscow

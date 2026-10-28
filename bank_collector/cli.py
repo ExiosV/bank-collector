@@ -170,7 +170,8 @@ def build_parser():
         action="store_true",
         help=(
             "do not scroll the rendered list, even when the profile asks for it "
-            "(the first rendered screen only; nothing else changes)"
+            "(the first rendered screen only; does not stop a pages walk; "
+            "remove the pages block from the profile to read only the first page)"
         ),
     )
     parser.add_argument(

@@ -116,8 +116,10 @@ and ``pages``:
     Optional: a history list cut into numbered pages that the cabinet
     replaces in place — ten operations per page, a "next" arrow, the same URL
     throughout.  It cannot be combined with ``scroll`` (two ways to read one
-    list) and, like ``scroll``, it needs a ``row``.  It describes the one
-    arrow the driver may press and the element that shows the current page::
+    list) or with ``header`` (a numbered-page list does not carry day headers
+    across page boundaries) and, like ``scroll``, it needs a ``row``.  It
+    describes the one arrow the driver may press and the element that shows
+    the current page::
 
         pages:
           next_selector: "nav.pagination .pagination__pages > button.pagination__item_arrow:last-child"
@@ -133,14 +135,20 @@ and ``pages``:
     The driver never presses anything else in this mode.  An arrow that does
     not resolve to exactly one element is not clicked and stops the run with
     an error; an arrow carrying ``disabled`` (or ``aria-disabled="true"``) is
-    the list's definitive end of history.  The current page number must be
-    exactly one element whose whole text is an integer: the click is made
-    only when the page can be recognised before it and has moved to the next
-    number afterwards (``wait_ms``).  The rows of every page are kept as they
-    are: the pages are disjoint, so two equal coffees on two pages are two
-    operations.  A page that repeats the previous page's rows is an error.
-    ``page_size`` and the day order (a newer page above an older one would
-    mean a lost page) are checked and only ever turn ``complete`` to False.
+    the list's definitive end of history.  The resolved arrow's collapsed text
+    must contain no digit (a numbered page button is never the arrow).  The
+    current page number must be exactly one element whose whole text is an
+    integer: the first page must read 1, the number before every click must
+    equal the number of pages read so far, and it must move to the next number
+    afterwards (``wait_ms``).  The rows of every page are kept as they are:
+    the pages are disjoint, so two equal coffees on two pages are two
+    operations.  A page that repeats the previous page's rows, or a page that
+    yields zero operation rows, is an error.  ``page_size`` and the day order
+    (a newer page above an older one would mean a lost page) are checked and
+    only ever turn ``complete`` to False.  After a walk that ended with
+    ``date`` or ``end`` the record's URL is opened again and the first page is
+    re-read: a changed first page means a new operation arrived mid-run and
+    the pages may have shifted, so the run is reported incomplete.
 
 The "flat" sugar form is accepted too — a record definition may list the
 fields directly instead of nesting them under ``fields``::
@@ -851,6 +859,19 @@ def _normalise_record(index, record, section, where):
                 % (where, index)
             )
         normalised_pages = _normalise_pages(index, pages, where)
+
+    # 'pages' and 'header' together are unsafe: when a day header is on the
+    # previous page and its operations start on the next page, the header is not
+    # carried across the page boundary (the list is replaced in place). The
+    # leading operations of that page would then have no date and be silently
+    # dropped while complete=true. Reject the combination explicitly.
+    if normalised_pages is not None and normalised_header is not None:
+        raise ProfileError(
+            "%s: record #%d: 'pages' and 'header' cannot be used together — a "
+            "numbered-page list does not carry day headers across page "
+            "boundaries, so operations whose header was on the previous page "
+            "would lose their date and be silently dropped" % (where, index)
+        )
 
     if normalised_scroll is not None and normalised_pages is not None:
         raise ProfileError(

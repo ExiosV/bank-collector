@@ -77,10 +77,17 @@ numbered pages, the list replaces its content on every page and the URL never
 changes. The driver reads the first page with the ordinary pass and then, while
 the date limit is not reached, presses the single element named by
 ``pages.next_selector`` and reads the page that replaced the previous one. The
-current page number is read from ``pages.active_selector`` before the click
-and must move to the next number afterwards; a disabled arrow is the list's
-definitive end. The pages are disjoint, so their rows are appended as they
-are, without cross-page dedup.
+current page number is read from ``pages.active_selector`` before the click:
+the first page must read 1 and the number must equal the number of pages read
+so far, otherwise nothing is clicked and the run stops with an error. The
+resolved arrow's text must contain no digit (a numbered page button is never
+the arrow). A disabled arrow is the list's definitive end. After a walk that
+ended with ``date`` or ``end`` the record's URL is opened again and the first
+page is re-read: if it changed, an operation arrived mid-run and the pages
+may have shifted, so the run is reported incomplete. The pages are disjoint,
+so their rows are appended as they are, without cross-page dedup.
+``pages`` cannot be combined with ``header``: a numbered-page list does not
+carry day headers across page boundaries.
 """
 
 import re
@@ -1563,14 +1570,30 @@ def _row_key_counts(rows):
     return Counter(_row_key(row) for row in rows)
 
 
-def _rows_signature(page, row_selector):
+def _rows_signature(page, row_selector, items_selector=None):
     """The texts of the rendered rows, as one tuple (empty when none or unreadable).
 
     A cheap fingerprint of the list: it tells the old page from the new one
     while the cabinet is still swapping the content in.
+
+    When *items_selector* is given, the signature is built from the texts of
+    the item rows inside every group row, not from the group rows themselves.
+    An operation list detects a page change by its operations: a record with
+    ``items`` must not let a shared day header (the group row) mask the fact
+    that the operations below it were replaced.
     """
     try:
-        return tuple(_collapsed(row.text_content()) for row in page.query_all(row_selector))
+        if not items_selector:
+            return tuple(
+                _collapsed(row.text_content()) for row in page.query_all(row_selector)
+            )
+        texts = []
+        for group in page.query_all(row_selector):
+            texts.extend(
+                _collapsed(item.text_content())
+                for item in group.query_all(items_selector)
+            )
+        return tuple(texts)
     except Exception:  # pragma: no cover - a re-render can kill a handle
         return ()
 
@@ -1587,8 +1610,9 @@ def _paginate_section(
     clicked in this mode. It must resolve to exactly one element; an arrow
     carrying ``disabled`` (or ``aria-disabled="true"``) ends the history. The
     current page number is read from ``pages.active_selector`` before the
-    click and must move to the next integer afterwards, together with at
-    least one rendered row.
+    click and must equal the number of pages read so far; the first page must
+    read 1. The page number must move to the next integer afterwards,
+    together with at least one rendered row.
 
     The pages are disjoint, so all their rows are kept without cross-page
     dedup: two equal coffees on two pages are two operations. A page whose
@@ -1598,10 +1622,22 @@ def _paginate_section(
     newest date of a page must not be newer than the oldest date of the page
     before — otherwise the run is reported incomplete.
 
+    When the record has ``items``, the signature uses the item row selector
+    (rows inside the record row) to detect page changes. A page that after
+    the switch yields zero rows from ``_extract_rows_stable`` is an error.
+
+    Before clicking, the resolved next element's collapsed text must contain
+    no digit (a numbered page button is never the arrow).
+
+    After the walk ends with stop "date" or "end", the record's URL is
+    revisited and the first page is re-read to detect history shifts
+    (an operation arriving mid-run shifts every page by one). The multiset of
+    row keys is compared with the first page read at the start.
+
     Returns ``(rows, info)`` where *info* mirrors the scroll block: ``mode``
     (``"pages"``), ``pages`` (how many pages were read), ``clicks``, ``rows``,
-    ``stop``, ``oldest_date``, ``headerless_rows`` (always 0 here) and
-    ``complete``.
+    ``stop``, ``oldest_date``, ``headerless_rows`` (always 0 here), ``complete``
+    and ``recheck`` (``"same"``, ``"changed"`` or ``"skipped"``).
     """
     next_selector = pages_def["next_selector"]
     active_selector = pages_def["active_selector"]
@@ -1617,6 +1653,37 @@ def _paginate_section(
     stop = "error"
     previous_rows = list(rows)
     polls = max(1, (wait_ms + _PAGE_POLL_MS - 1) // _PAGE_POLL_MS)
+
+    # Capture the first page keys for the recheck at the end.
+    # The `rows` parameter contains only the first page's operations at this point.
+    first_page_keys_at_start = Counter(_row_key(row) for row in rows)
+
+    # Determine the row selector for the signature: when the record has items,
+    # the signature must look at the item rows, not the group rows.
+    items_def = record_def.get("items")
+    signature_row_selector = record_def["row"]
+    signature_items_selector = items_def["row"] if items_def else None
+
+    # Check that the first page reads as page 1.
+    first_number = _active_page_number(page, active_selector)
+    if first_number is not None and first_number != 1:
+        warnings.append(
+            "%s: list did not open on page 1 (active page is %d)" % (section_name, first_number)
+        )
+        stop = "error"
+        info = {
+            "mode": "pages",
+            "pages": pages_read,
+            "clicks": clicks,
+            "rows": len(rows),
+            "stop": stop,
+            "oldest_date": _oldest_date(rows),
+            "headerless_rows": 0,
+            "recheck": "skipped",
+        }
+        _judge_completeness(warnings, section_name, info, stop_before)
+        info["complete"] = False
+        return rows, info
 
     while True:
         if _reached_date(rows, stop_before):
@@ -1657,7 +1724,32 @@ def _paginate_section(
             stop = "error"
             break
 
-        before = _rows_signature(page, record_def["row"])
+        # Anchor the page number: before clicking, the active number must equal
+        # the number of pages read so far.
+        if previous_number != pages_read:
+            warnings.append(
+                "%s: page number %d does not match pages read %d"
+                % (section_name, previous_number, pages_read)
+            )
+            stop = "error"
+            break
+
+        # Click hardening: the resolved arrow's collapsed text must contain no
+        # digit. A numbered page button is never the arrow; if the selector
+        # matched a page number button instead, we must not click it.
+        try:
+            arrow_text = _collapsed(arrow.text_content())
+        except Exception:
+            arrow_text = ""
+        if any(ch.isdigit() for ch in arrow_text):
+            warnings.append(
+                "%s: next-page selector matched an element with digits in its text (%r) — "
+                "this is a page number button, not the arrow; no click" % (section_name, arrow_text)
+            )
+            stop = "error"
+            break
+
+        before = _rows_signature(page, signature_row_selector, signature_items_selector)
         try:
             arrow.click()
         except Exception as exc:
@@ -1669,16 +1761,21 @@ def _paginate_section(
         # The cabinet replaces the list in place, and the page number may move
         # before the new rows arrive: wait until the number moved on AND the
         # rendered rows are there and differ from the rows before the click.
+        # A page whose number moved but whose list stays empty (a header-only
+        # or truly empty page) is not "not advanced": the extraction below
+        # reports the empty page as an error.
+        number_moved = False
         advanced = False
         for attempt in range(polls):
             if _active_page_number(page, active_selector) == previous_number + 1:
-                current = _rows_signature(page, record_def["row"])
+                number_moved = True
+                current = _rows_signature(page, signature_row_selector, signature_items_selector)
                 if current and current != before:
                     advanced = True
                     break
             if attempt + 1 < polls:
                 time.sleep(_PAGE_POLL_MS / 1000.0)
-        if not advanced:
+        if not advanced and not number_moved:
             warnings.append(
                 "%s: page did not advance past %d" % (section_name, previous_number)
             )
@@ -1691,6 +1788,18 @@ def _paginate_section(
         next_rows = _extract_rows_stable(
             page, record_def, section_name, warnings, timeout_ms=timeout_ms, now=now
         )
+
+        # A page that yields zero rows after the click means the list did not
+        # actually switch to a page with operations (e.g. a header-only page or
+        # an empty page). This is an error.
+        if not next_rows:
+            warnings.append(
+                "%s: page %d yielded zero rows after the click (the list did not switch "
+                "to a page with operations)" % (section_name, pages_read + 1)
+            )
+            stop = "error"
+            break
+
         next_number = pages_read + 1
 
         if _row_key_counts(next_rows) == _row_key_counts(previous_rows):
@@ -1724,6 +1833,49 @@ def _paginate_section(
         previous_rows = list(next_rows)
         pages_read = next_number
 
+    # After the walk ends with stop "date" or "end", revisit the record's URL
+    # and re-read the first page to detect history shifts (an operation arriving
+    # mid-run shifts every page by one). Skip when stop is error/limit or the
+    # record has no url.
+    recheck = "skipped"
+    if stop in ("date", "end") and record_def.get("url"):
+        record_url = record_def["url"]
+        try:
+            page.goto(record_url)
+        except Exception as exc:
+            # The page could not be opened again: the recheck cannot be made.
+            # Never claim completeness on an unverified first page.
+            warnings.append("%s: first page recheck failed (%s)" % (section_name, exc))
+            short_page = True
+        else:
+            wait_for = record_def.get("wait_for")
+            if wait_for:
+                try:
+                    page.wait_for_selector(wait_for, timeout=timeout_ms)
+                except Exception as exc:
+                    # A missing selector is reported but not fatal, exactly like
+                    # ``visit_record``: the extraction below decides.
+                    warnings.append(
+                        "waited for %r but it did not appear (%s)" % (wait_for, exc)
+                    )
+            try:
+                recheck_rows = _extract_rows_stable(
+                    page, record_def, section_name, warnings, timeout_ms=timeout_ms, now=now
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append("%s: first page recheck failed (%s)" % (section_name, exc))
+                recheck_rows = []
+            first_page_keys_at_end = _row_key_counts(recheck_rows)
+            if first_page_keys_at_start != first_page_keys_at_end:
+                warnings.append(
+                    "%s: the first page changed during the run (a new operation arrived?) "
+                    "— pages may have shifted, history may be incomplete" % section_name
+                )
+                recheck = "changed"
+                short_page = True  # force complete to False
+            else:
+                recheck = "same"
+
     info = {
         "mode": "pages",
         "pages": pages_read,
@@ -1732,6 +1884,7 @@ def _paginate_section(
         "stop": stop,
         "oldest_date": _oldest_date(rows),
         "headerless_rows": 0,
+        "recheck": recheck,
     }
     _judge_completeness(warnings, section_name, info, stop_before)
     # A short intermediate page or a newer page above an older one can only
@@ -1881,9 +2034,11 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     feed with no reliable overlap between rounds). A paginated run reports
     ``{"mode": "pages", "pages": P, "clicks": K, "rows": M, "stop": "date"|
     "end"|"limit"|"error", "oldest_date": ..., "headerless_rows": 0,
-    "complete": bool}``: how many pages were read, how many times the "next
-    page" arrow was pressed and where the walk stopped (``end`` is a disabled
-    arrow — the list's definitive end of history).
+    "recheck": "same"|"changed"|"skipped", "complete": bool}``: how many pages
+    were read, how many times the "next page" arrow was pressed, where the walk
+    stopped (``end`` is a disabled arrow — the list's definitive end of history)
+    and whether the re-read first page matched the one read at the start
+    (``recheck``).
 
     *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
     relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field

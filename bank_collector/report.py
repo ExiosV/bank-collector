@@ -14,12 +14,19 @@ The JSON document is the artefact of this tool::
       "warnings":    [ "..." ]
     }
 
-When the run scrolled the rendered list, the document holds one more key —
-the provenance of that scroll:
+When the run scrolled the rendered list or walked numbered pages, the
+document holds one more key — the provenance of that walk:
 
     {
       "scroll": {"rounds": 12, "rows": 143, "stop": "date", "clicks": 0,
                  "oldest_date": "2025-12-31", "complete": true}
+    }
+
+For a paginated run the block looks like:
+
+    {
+      "scroll": {"mode": "pages", "pages": 59, "clicks": 58, "rows": 590,
+                 "stop": "date", "oldest_date": "2025-12-31", "complete": true}
     }
 
 An imported statement adds the ``statement`` block (file, rows, period,

@@ -14,6 +14,7 @@ overwrite a fuller snapshot.
 
 import copy
 import io
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -75,22 +76,39 @@ def _group(header, operations):
     )
 
 
-def _pagination(number, last=False, navs=1):
+def _pagination(number, last=False, navs=1, actives=1, active_text=None, aria_disabled=False):
     """The pagination block; the right arrow is the one `pages` clicks.
 
     *navs* > 1 renders the whole block twice, so the "next" selector finds
     two elements for the "none clicked" test. *last* disables the right
-    arrow, which is the list's own definitive end of history.
+    arrow, which is the list's own definitive end of history; *aria_disabled*
+    expresses that end as ``aria-disabled="true"`` instead of ``disabled``.
+    The two arrows carry distinguishable labels (``aria-label``) so a test
+    can prove that only the right one was pressed. *actives* and *active_text*
+    build a broken paginator: two active buttons, or a non-integer one.
     """
-    left = "<button class='pagination__item pagination__item_arrow' disabled>left</button>"
-    active = "<button class='pagination__item pagination__item_active'>%d</button>" % number
+    left = (
+        "<button class='pagination__item pagination__item_arrow' "
+        "aria-label='Назад' data-direction='prev' disabled>left</button>"
+    )
+    label = active_text if active_text is not None else str(number)
+    active = (
+        "<button class='pagination__item pagination__item_active'>%s</button>" % label
+    ) * actives
     others = "".join(
         "<button class='pagination__item'>%d</button>" % page
         for page in (1, 2, 3, 4)
         if page != number
     )
-    right = "<button class='pagination__item pagination__item_arrow'%s>right</button>" % (
-        " disabled" if last else ""
+    if last and aria_disabled:
+        disabled = " aria-disabled='true'"
+    elif last:
+        disabled = " disabled"
+    else:
+        disabled = ""
+    right = (
+        "<button class='pagination__item pagination__item_arrow' "
+        "aria-label='Вперёд' data-direction='next'%s>right</button>" % disabled
     )
     return (
         "<nav class='pagination'><div class='pagination__pages'>%s%s%s%s</div></nav>"
@@ -98,13 +116,13 @@ def _pagination(number, last=False, navs=1):
     ) * navs
 
 
-def _history(number, groups, last=False, navs=1):
+def _history(number, groups, last=False, navs=1, **pagination_options):
     """A whole history page: the day groups and its pagination."""
     return (
         "<html><body><div class='history'>%s%s</div></body></html>"
         % (
             "".join(_group(header, operations) for header, operations in groups),
-            _pagination(number, last=last, navs=navs),
+            _pagination(number, last=last, navs=navs, **pagination_options),
         )
     )
 
@@ -118,10 +136,25 @@ class PagedPage(FakePage):
         self.index = 0
         #: The class attribute of every element that was clicked, in order.
         self.clicks = []
+        #: The ``data-direction`` of every clicked element, in order: "next"
+        #: for the right arrow, "prev" for the left one. A test can prove that
+        #: the right arrow (and not the left one) was pressed.
+        self.clicked_directions = []
         self._on_click = self._advance
+
+    def goto(self, url, **kwargs):
+        self.visited.append(url)
+        if url.rstrip("/") == HISTORY_URL.rstrip("/"):
+            self.url = url
+            self.index = 0
+            self._set_root(self.htmls[0])
+            return None
+        # For other URLs, fall back to the base implementation.
+        return super().goto(url, **kwargs)
 
     def _advance(self, page, element):
         self.clicks.append(element.get_attribute("class") or "")
+        self.clicked_directions.append(element.get_attribute("data-direction") or "")
         if self.index + 1 < len(self.htmls):
             self.index += 1
             self._set_root(self.htmls[self.index])
@@ -132,6 +165,7 @@ class StuckPage(PagedPage):
 
     def _advance(self, page, element):
         self.clicks.append(element.get_attribute("class") or "")
+        self.clicked_directions.append(element.get_attribute("data-direction") or "")
 
 
 class LaggingPage(PagedPage):
@@ -184,6 +218,59 @@ class TwoPageCabinet(FakePage):
         raise LookupError("no fixture for %r" % url)
 
 
+class _NumberElement(object):
+    """A stand-in for the active-page element with a fixed text."""
+
+    def __init__(self, text):
+        self._text = text
+
+    def text_content(self):
+        return self._text
+
+    def get_attribute(self, name):
+        return None
+
+
+class ScriptedActivePage(PagedPage):
+    """The active page number follows a script, one read per call.
+
+    Lets a test make the number jump (page 1 reads 1, the next read says 3)
+    while the page's real HTML still shows a valid number. The script is
+    consumed left to right; once it is empty the real markup answers.
+    """
+
+    def __init__(self, htmls, numbers):
+        PagedPage.__init__(self, htmls)
+        self.numbers = list(numbers)
+
+    def query_all(self, selector):
+        if selector == ACTIVE_SELECTOR and self.numbers:
+            return [_NumberElement(str(self.numbers.pop(0)))]
+        return PagedPage.query_all(self, selector)
+
+
+class ShiftingCabinet(PagedPage):
+    """The first page gains a new operation on the recheck visit.
+
+    An operation arriving mid-run shifts every page by one: the first page is
+    re-read after the walk and its rows differ from the ones read at the
+    start. *shifted_first_page* is the HTML served by the second visit to the
+    history URL.
+    """
+
+    def __init__(self, htmls, shifted_first_page):
+        PagedPage.__init__(self, htmls)
+        self.shifted_first_page = shifted_first_page
+        self.history_gotos = 0
+
+    def goto(self, url, **kwargs):
+        if url.rstrip("/") == HISTORY_URL.rstrip("/"):
+            self.history_gotos += 1
+            if self.history_gotos >= 2:
+                self.htmls[0] = self.shifted_first_page
+        return PagedPage.goto(self, url, **kwargs)
+
+
 def _read_fixture(name):
     with open(os.path.join(FIXTURES, name), "r", encoding="utf-8") as handle:
         return handle.read()
@@ -215,7 +302,7 @@ def _ops(count, title="Магазин", amount="−900 ₽"):
 def test_raif_profile_loads_and_names_the_pagination():
     profile = load_profile("raif")
 
-    assert profile["status"] == "verified"
+    assert profile["status"] == "unverified"
     assert profile["url"] == HOME_URL
     assert profile["timezone"] == "Europe/Moscow"
 
@@ -349,10 +436,14 @@ def test_three_pages_are_kept_whole_and_a_disabled_arrow_ends_the_history():
         "stop": "end",
         "oldest_date": "2026-10-24",
         "headerless_rows": 0,
+        "recheck": "same",
         "complete": True,
     }, "a disabled arrow is the definitive end, even above stop_before_date"
     assert _warnings(result) == []
     assert page.clicks == ["pagination__item pagination__item_arrow"] * 2
+    assert page.clicked_directions == ["next", "next"], (
+        "only the right arrow (data-direction='next') is pressed, never 'Назад'"
+    )
 
 
 def test_a_row_older_than_stop_before_date_stops_the_walk():
@@ -451,7 +542,11 @@ def test_a_newer_page_below_an_older_one_makes_the_run_incomplete():
     page = PagedPage(
         [
             _history(1, [("10 января 2026", _ops(3))]),
-            _history(2, [("20 января 2026", _ops(3))], last=True),
+            _history(
+                2,
+                [("20 января 2026", [_operation("Кофе", "−250 ₽")] * 3)],
+                last=True,
+            ),
         ]
     )
 
@@ -470,8 +565,8 @@ def test_max_pages_is_reported_as_a_limit():
     page = PagedPage(
         [
             _history(1, [("12 января 2026", _ops(3))]),
-            _history(2, [("11 января 2026", _ops(3))]),
-            _history(3, [("10 января 2026", _ops(3))]),
+            _history(2, [("11 января 2026", [_operation("Кофе", "−250 ₽")] * 3)]),
+            _history(3, [("10 января 2026", [_operation("Метро", "−50 ₽")] * 3)]),
         ]
     )
 
@@ -485,6 +580,318 @@ def test_max_pages_is_reported_as_a_limit():
     assert _warnings(result) == [
         "transactions: page limit reached after 2 pages (6 rows, history may be incomplete)"
     ]
+
+
+# ---------------------------------------------------------------------------
+# The page number is anchored (item 2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_list_that_does_not_open_on_page_1_is_an_error():
+    page = PagedPage([_history(2, [("24 октября, суббота", _ops(3))], last=True)])
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == [], "the list did not open on page 1: not one click"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["pages"] == 1
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: list did not open on page 1 (active page is 2)"
+    ]
+
+
+def test_a_page_number_that_does_not_match_pages_read_stops_before_the_click():
+    page = ScriptedActivePage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            _history(
+                2,
+                [("23 октября, пятница", [_operation("Кофе", "−250 ₽")] * 3)],
+            ),
+            _history(3, [("22 октября, четверг", [_operation("Метро", "−50 ₽")] * 3)], last=True),
+        ],
+        # Read #1 is the "did it open on page 1" check, #2 the first click's
+        # anchor, #3 the advance poll, #4 the second click's anchor. The last
+        # one jumps to 3 while only two pages have been read.
+        numbers=[1, 1, 2, 3],
+    )
+
+    result = collect(
+        page, _profile(page_size=3, wait_ms=1, settle_ms=0, stop_before_date=None), now=NOW
+    )
+
+    assert page.clicked_directions == ["next"], "only the first click was made"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["pages"] == 2
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: page number 3 does not match pages read 2"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The advance check looks at operation rows (item 3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_header_only_page_after_the_click_is_an_error():
+    page = PagedPage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            # The day header is there but the page holds no operations.
+            _history(2, [("24 октября, суббота", [])], last=True),
+        ]
+    )
+
+    result = collect(
+        page, _profile(page_size=3, wait_ms=1, settle_ms=0, stop_before_date=None), now=NOW
+    )
+
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["pages"] == 1
+    assert result["scroll"]["complete"] is False
+    assert any(
+        "page 2 yielded zero rows after the click" in warning
+        for warning in _warnings(result)
+    )
+
+
+def test_an_empty_page_after_the_click_is_an_error():
+    page = PagedPage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            "<html><body><div class='history'>%s</div></body></html>"
+            % _pagination(2, last=True),
+        ]
+    )
+
+    result = collect(
+        page, _profile(page_size=3, wait_ms=1, settle_ms=0, stop_before_date=None), now=NOW
+    )
+
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["complete"] is False
+    assert any(
+        "page 2 yielded zero rows after the click" in warning
+        for warning in _warnings(result)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Click hardening (item 4)
+# ---------------------------------------------------------------------------
+
+
+def test_an_arrow_whose_text_contains_a_digit_is_never_clicked():
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))])])
+
+    result = collect(
+        page,
+        _profile(page_size=3, stop_before_date=None, next_selector=ACTIVE_SELECTOR),
+        now=NOW,
+    )
+
+    assert page.clicks == [], "a numbered page button is not the arrow"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert any("digits in its text" in warning for warning in _warnings(result))
+
+
+# ---------------------------------------------------------------------------
+# Broken paginators (item 6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_next_selector_matching_no_element_is_never_clicked():
+    html = "<html><body><div class='history'>%s</div></body></html>" % _group(
+        "24 октября, суббота", _ops(3)
+    )
+    page = PagedPage([html])
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == []
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: next-page selector %r matched 0 elements, none clicked"
+        % NEXT_SELECTOR
+    ]
+
+
+def test_active_selector_matching_zero_elements_is_never_clicked():
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))], actives=0)])
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == []
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: active-page selector %r matched 0 elements, not one page number"
+        % ACTIVE_SELECTOR
+    ]
+
+
+def test_active_selector_matching_two_elements_is_never_clicked():
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))], actives=2)])
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == []
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: active-page selector %r matched 2 elements, not one page number"
+        % ACTIVE_SELECTOR
+    ]
+
+
+def test_active_selector_with_non_integer_text_is_never_clicked():
+    page = PagedPage(
+        [_history(1, [("24 октября, суббота", _ops(3))], active_text="стр.")]
+    )
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == []
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: active-page selector %r holds 'стр.', not a page number"
+        % ACTIVE_SELECTOR
+    ]
+
+
+def test_an_aria_disabled_arrow_ends_the_history():
+    page = PagedPage(
+        [_history(1, [("24 октября, суббота", _ops(3))], last=True, aria_disabled=True)]
+    )
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == [], "a disabled arrow is never pressed"
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
+
+
+# ---------------------------------------------------------------------------
+# The first page is re-checked at the end of the walk (item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_the_first_page_is_rechecked_and_unchanged_after_the_walk():
+    page = PagedPage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            _history(
+                2,
+                [("23 октября, пятница", [_operation("Кофе", "−250 ₽")] * 3)],
+                last=True,
+            ),
+        ]
+    )
+
+    result = collect(page, _profile(page_size=3), now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "same"
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
+
+
+def test_a_first_page_that_changed_during_the_walk_makes_the_run_incomplete():
+    original_first = _history(
+        1,
+        [
+            (
+                "24 октября, суббота",
+                [
+                    _operation("Магазин", "−900 ₽"),
+                    _operation("Кофе", "−250 ₽"),
+                    _operation("Магазин", "−900 ₽"),
+                ],
+            )
+        ],
+    )
+    # A new operation arrived: it shifted every page by one, so the first
+    # page now starts with a row it did not have at the start of the walk.
+    shifted_first = _history(
+        1,
+        [
+            (
+                "24 октября, суббота",
+                [
+                    _operation("Новая", "−100 ₽"),
+                    _operation("Магазин", "−900 ₽"),
+                    _operation("Кофе", "−250 ₽"),
+                ],
+            )
+        ],
+    )
+    page = ShiftingCabinet(
+        [
+            original_first,
+            _history(2, [("24 октября, суббота", [_operation("Аптека", "−400 ₽")])], last=True),
+        ],
+        shifted_first,
+    )
+
+    result = collect(page, _profile(page_size=3), now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "changed"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: the first page changed during the run (a new operation arrived?) "
+        "— pages may have shifted, history may be incomplete"
+    ]
+
+
+def test_the_recheck_is_skipped_when_the_record_has_no_url():
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))], last=True)])
+    profile = _profile(page_size=3, stop_before_date=None)
+    profile["transactions"][0]["url"] = None
+
+    result = collect(page, profile, now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "skipped"
+    assert result["scroll"]["complete"] is True
+
+
+# ---------------------------------------------------------------------------
+# The keep-fuller-snapshot guard treats a pages run like a scroll run (item 6)
+# ---------------------------------------------------------------------------
+
+
+def test_an_incomplete_paginated_run_keeps_a_fuller_snapshot(tmp_path):
+    previous_path = tmp_path / "raif.json"
+    previous = {
+        "transactions": [{"n": index} for index in range(100)],
+        "scroll": {"mode": "pages", "stop": "date", "complete": True},
+    }
+    previous_path.write_text(json.dumps(previous), encoding="utf-8")
+
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))], navs=2)])
+    collected = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+    report = report_mod.build_report(collected)
+
+    assert report["scroll"]["mode"] == "pages"
+    assert cli._incomplete(report) is True
+
+    written, kept = cli._write_outputs(report, str(tmp_path), "json", "raif")
+
+    assert kept == str(previous_path)
+    assert written == [str(tmp_path / "raif.partial.json")]
+    assert len(json.loads(previous_path.read_text(encoding="utf-8"))["transactions"]) == 100
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +940,21 @@ def test_pages_with_scroll_is_rejected(tmp_path):
             "pages_and_scroll",
             _PAGES + "    scroll:\n      max_rounds: 2\n",
         )
+
+
+def test_pages_with_header_is_rejected(tmp_path):
+    """A numbered-page list does not carry day headers across pages."""
+    header = (
+        "    header:\n"
+        "      selector: '.day'\n"
+        "      fields:\n"
+        "        date:\n"
+        "          selector: '.day'\n"
+    )
+    with pytest.raises(
+        ProfileError, match="'pages' and 'header' cannot be used together"
+    ):
+        _load(tmp_path, "pages_and_header", _PAGES + header)
 
 
 def test_pages_unknown_key_is_rejected(tmp_path):

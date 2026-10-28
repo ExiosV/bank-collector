@@ -57,8 +57,8 @@
 # login; a full run takes ~22 minutes of continuous activity. If the session
 # dies mid-run the cabinet redirects the page to /login/main, which matches the
 # `signed_out` marker below: the run then ends with exit code 6, prints exactly
-# the one stdout line `SIGNED_OUT: raif`, writes no files and never overwrites a
-# fuller snapshot. Exit code 5 happens only when the page stops advancing
+# the one stdout line `SIGNED_OUT: raif`, writes no files. For a session that
+# dies mid-run, the run ends with an error (exit 5) if the page stops advancing
 # without the redirect matching the marker. An unattended night run will not
 # work — it must run while the owner is logged in.
 #

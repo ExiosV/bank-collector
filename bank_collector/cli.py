@@ -17,7 +17,9 @@ Exit codes
     ``signed_out`` block) and prints one line ``SIGNED_OUT: <bank>``. No
     report file is written and no existing file is touched (warnings go to
     stderr). ``--check-session`` reports the same state as ``SESSION:
-    signed-out <bank>``
+    signed-out <bank>``. A session that dies mid-run (pages, scroll, recheck
+    or visit) also ends in exit 6: records already read are discarded, and
+    nothing is written.
 
 ``--check-session`` opens only the profile's URL — no unlock code, no record
 page, no click and no scroll — waits for its ``wait_for`` selector or a

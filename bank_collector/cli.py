@@ -14,15 +14,18 @@ Exit codes
     ``<bank>.partial.json`` — not a success either way
 6   the cabinet showed its sign-in screen: nobody is signed in. The run stops
     before any record is read (the marker comes from the profile's
-    ``signed_out`` block) and prints one line ``SIGNED_OUT: <bank>``.
-    ``--check-session`` reports the same state as ``SESSION: signed-out
-    <bank>``
+    ``signed_out`` block) and prints one line ``SIGNED_OUT: <bank>``. No
+    report file is written and no existing file is touched (warnings go to
+    stderr). ``--check-session`` reports the same state as ``SESSION:
+    signed-out <bank>``
 
 ``--check-session`` opens only the profile's URL — no unlock code, no record
 page, no click and no scroll — waits for its ``wait_for`` selector or a
 ``signed_out`` marker (up to ``--timeout``) and prints exactly one line:
 ``SESSION: ok <bank>`` (exit 0), ``SESSION: signed-out <bank>`` (exit 6) or
-``SESSION: unknown <bank>`` (exit 4, neither appeared). It writes no report.
+``SESSION: unknown <bank>`` (exit 4, neither appeared); for ``unknown`` the
+reason (a failed navigation, or neither the selector nor a marker appearing
+within ``--timeout``) is written to stderr. It writes no report.
 
 ``--import-statement PATH`` reads a statement the owner downloaded by hand
 from the cabinet. It needs ``--bank`` and no browser: the file is read from
@@ -565,6 +568,16 @@ def _import_statement(args):
     return EXIT_OK
 
 
+def _bad_usage(message):
+    """Reject a bad command line with exit 3, not ``argparse``'s 2.
+
+    Exit code 2 is documented as "no browser could be attached", so a
+    combination of flags that makes no sense is a profile/usage error (3).
+    """
+    sys.stderr.write("error: %s\n" % message)
+    return EXIT_BAD_PROFILE
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -575,9 +588,15 @@ def main(argv=None):
     if args.check_session and (
         args.enter_code or args.import_statement or args.clear_code_failure
     ):
-        parser.error(
+        return _bad_usage(
             "--check-session cannot be combined with --enter-code, "
             "--import-statement or --clear-code-failure"
+        )
+
+    if args.check_session and (args.snapshot or args.as_json or args.as_csv):
+        return _bad_usage(
+            "--check-session cannot be combined with --snapshot, --json or "
+            "--csv: it prints one line and writes no report"
         )
 
     if args.list_profiles:
@@ -645,10 +664,15 @@ def main(argv=None):
         if args.check_session:
             # Read-only probe: only the profile URL is opened. No unlock, no
             # record page, no click, no scroll and no report.
-            status = check_session(page, profile, timeout_ms=args.timeout)
+            reasons = []
+            status = check_session(
+                page, profile, timeout_ms=args.timeout, reasons=reasons
+            )
             bank = profile.get("bank") or args.bank
             sys.stdout.write((SESSION_LINES[status] % bank) + "\n")
             sys.stdout.flush()
+            for reason in reasons:
+                sys.stderr.write("SESSION: unknown: %s\n" % reason)
             return SESSION_EXITS[status]
 
         collect_target = page
@@ -663,10 +687,18 @@ def main(argv=None):
         bank = profile.get("bank") or args.bank
         signed_out = collected.get("signed_out")
 
-        # A sign-in screen is not the cabinet: no snapshot of it and no empty
-        # report on stdout, just the files (a fuller one is never replaced)
-        # and the one line the scheduler watches for.
-        if args.snapshot and not signed_out:
+        if signed_out:
+            # A sign-in screen is not the cabinet: no report file at all — no
+            # JSON, no CSV, not even a .partial.json — and no existing file is
+            # touched. stdout carries exactly the one line the scheduler
+            # watches for; the explanation goes to stderr.
+            for warning in report["warnings"]:
+                sys.stderr.write("warning: %s\n" % warning)
+            sys.stdout.write((SIGNED_OUT_LINE % bank) + "\n")
+            sys.stdout.flush()
+            return EXIT_SIGNED_OUT
+
+        if args.snapshot:
             paths, error = _snapshot(page, args.out, bank)
             if error:
                 sys.stderr.write("warning: %s\n" % error)
@@ -677,10 +709,10 @@ def main(argv=None):
         for path in written:
             sys.stdout.write("written: %s\n" % path)
 
-        if args.as_json and not signed_out:
+        if args.as_json:
             json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
             sys.stdout.write("\n")
-        if args.as_csv and not signed_out:
+        if args.as_csv:
             import csv as csv_mod
 
             writer = csv_mod.writer(sys.stdout)
@@ -700,9 +732,7 @@ def main(argv=None):
         for warning in report["warnings"]:
             sys.stderr.write("warning: %s\n" % warning)
 
-        code = _exit_code(report, written, kept, signed_out=signed_out)
-        if code == EXIT_SIGNED_OUT:
-            sys.stdout.write((SIGNED_OUT_LINE % bank) + "\n")
+        code = _exit_code(report, written, kept)
         return code
     finally:
         # Close the tab we opened ourselves, and never the person's browser.

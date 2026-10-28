@@ -212,8 +212,8 @@ of blaming the selectors::
       url_contains: ["/login"]        # substrings of the page URL path
       text: ["Войти в онлайн-банк"]   # visible texts of the sign-in screen
 
-At least one of the two lists must be present and non-empty; a plain string is
-accepted as a one-element list.  The URL markers are matched as substrings of
+At least one of the two lists must hold an entry (the other may be empty);
+a plain string is accepted as a one-element list.  The URL markers are matched as substrings of
 the page's URL path, the text markers against the page's body text
 (case-folded, whitespace collapsed).  They only describe the sign-in screen —
 like the rest of the profile they never carry a credential (the credential
@@ -1015,9 +1015,10 @@ def _normalise_signed_out(section, where):
 
     The section describes the cabinet's sign-in screen: a substring of the
     URL path and/or a visible text that betrays it.  At least one of the two
-    lists must be present and non-empty; a plain string is accepted as a
-    one-element list.  It never holds a credential — an unknown key is
-    rejected, and a key whose name looks like a credential is named as such.
+    lists must hold an entry; the other may be omitted or empty (``[]``).  A
+    plain string is accepted as a one-element list.  It never holds a
+    credential — an unknown key is rejected, and a key whose name looks like a
+    credential is named as such.
     """
     if not isinstance(section, dict):
         raise ProfileError("%s: 'signed_out' must be a mapping" % where)
@@ -1044,17 +1045,17 @@ def _normalise_signed_out(section, where):
             continue
         if isinstance(value, str):
             value = [value]
-        if not isinstance(value, list) or not value:
+        if not isinstance(value, list):
             raise ProfileError(
-                "%s: 'signed_out.%s' must be a non-empty list of non-empty strings"
+                "%s: 'signed_out.%s' must be a list of non-empty strings"
                 % (where, key)
             )
         cleaned = []
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ProfileError(
-                    "%s: 'signed_out.%s' must be a non-empty list of non-empty strings"
-                    % (where, key)
+                    "%s: 'signed_out.%s' must hold non-empty strings, not %r"
+                    % (where, key, item)
                 )
             cleaned.append(item.strip())
         result[key] = cleaned

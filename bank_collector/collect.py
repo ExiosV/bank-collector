@@ -97,11 +97,15 @@ carry day headers across page boundaries.
 When the profile has a ``signed_out`` block, every page the driver opens — the
 profile's own URL and each record's page — is checked for the cabinet's
 sign-in screen: a URL-path substring and/or a visible text (case-folded,
-whitespace collapsed).  A match stops the run at once, before any further
-navigation, click or read: the result carries no rows and a ``signed_out``
-marker, so the caller can tell "the owner is not signed in" from "the
-selectors broke".  ``check_session`` uses the same markers to answer that
-question without reading a single record.
+whitespace collapsed).  A session can also die in the middle of a long walk,
+so the markers are checked after every "next page" click (with the advance
+wait failing or not), right after the first-page recheck navigation, and in
+every scroll round (the URL each round, the text only when a round added no
+rows).  A match stops the run at once, before any further navigation, click
+or read: the result carries no rows and a ``signed_out`` marker, so the
+caller can tell "the owner is not signed in" from "the selectors broke".
+``check_session`` uses the same markers to answer that question without
+reading a single record.
 """
 
 import re
@@ -138,6 +142,10 @@ SIGNED_OUT_WARNING = "signed out: the cabinet shows its sign-in screen (%s)"
 #: How often ``--check-session`` looks at the page while it waits for either
 #: the profile's ``wait_for`` selector or a ``signed_out`` marker.
 _SESSION_POLL_MS = 250
+
+#: How often it reads the page body for a text marker: that read is a round
+#: trip to the browser, the URL check is not.
+_SESSION_TEXT_POLL_MS = 1000
 
 # Money-like text: an optional sign, a number with (optional) thousands
 # separators and (optional) a two-digit fraction, then an optional currency
@@ -888,7 +896,7 @@ class _SignedOut(Exception):
         self.marker = marker
 
 
-def signed_out_marker(page, config):
+def signed_out_marker(page, config, text=True):
     """Describe the sign-in marker the page matches, or return ``None``.
 
     *config* is the profile's ``signed_out`` block (or ``None``).  A URL
@@ -896,6 +904,10 @@ def signed_out_marker(page, config):
     marker matches when it occurs in the page body after case-folding and
     whitespace collapsing.  The returned string names the marker that
     matched, so the warning tells which clue fired.
+
+    *text* may be ``False`` to check only the URL markers: reading the page
+    body costs a round trip, while the URL is already at hand, so the loops
+    that run for minutes use it only when a cheap check is needed.
     """
     if not config:
         return None
@@ -915,7 +927,7 @@ def signed_out_marker(page, config):
                 return "url contains %r" % needle
 
     needles = config.get("text") or []
-    if needles:
+    if text and needles:
         try:
             body = page.inner_text("body")
         except Exception:  # pragma: no cover - an unreadable body is not a marker
@@ -930,11 +942,16 @@ def signed_out_marker(page, config):
     return None
 
 
-def _raise_if_signed_out(page, config):
+def _raise_if_signed_out(page, config, text=True):
     """Raise :class:`_SignedOut` when the page is the cabinet's sign-in screen."""
-    marker = signed_out_marker(page, config)
+    marker = signed_out_marker(page, config, text=text)
     if marker:
         raise _SignedOut(marker)
+
+
+def _has_text_marker(config):
+    """True when *config* names at least one marker in the page body."""
+    return bool(config and config.get("text"))
 
 
 def _selector_present(page, selector):
@@ -945,34 +962,71 @@ def _selector_present(page, selector):
         return False
 
 
-def check_session(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS):
+def check_session(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, reasons=None):
     """Tell whether the attached browser is still signed in to the cabinet.
 
     Only the profile's own URL is opened: no unlock code, no record page, no
-    click and no scroll.  For up to *timeout_ms* the page is polled for the
-    profile's ``wait_for`` selector and for its ``signed_out`` markers.
+    click and no scroll.  For up to *timeout_ms* of wall-clock time (measured
+    with ``time.monotonic``) the page is polled for the profile's ``wait_for``
+    selector and for its ``signed_out`` markers.  The URL markers are cheap
+    and are looked at every poll; the body text of a text marker is read at
+    most once a second.
 
     Returns ``"ok"`` (the cabinet rendered), ``"signed-out"`` (a sign-in
     marker matched) or ``"unknown"`` (neither appeared, or the page could not
     be opened).  A profile without a ``signed_out`` block can only ever give
-    ``ok`` or ``unknown``.
+    ``ok`` or ``unknown``.  When *reasons* is a list, a prose explanation of
+    an ``"unknown"`` answer is appended to it, for the caller's stderr.
     """
+    if reasons is None:
+        reasons = []
     try:
         page.goto(profile["url"])
-    except Exception:
+    except Exception as exc:
+        reasons.append("navigation failed: %s" % exc)
         return "unknown"
 
     config = profile.get("signed_out")
     wait_for = profile.get("wait_for")
-    polls = max(1, (timeout_ms + _SESSION_POLL_MS - 1) // _SESSION_POLL_MS)
-    for attempt in range(polls):
-        if signed_out_marker(page, config):
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
+    last_text = None
+    while True:
+        now = time.monotonic()
+        want_text = _has_text_marker(config) and (
+            last_text is None or now - last_text >= _SESSION_TEXT_POLL_MS / 1000.0
+        )
+        if want_text:
+            last_text = now
+        if signed_out_marker(page, config, text=want_text):
             return "signed-out"
         if wait_for and _selector_present(page, wait_for):
             return "ok"
-        if attempt + 1 < polls:
-            time.sleep(_SESSION_POLL_MS / 1000.0)
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        time.sleep(min(_SESSION_POLL_MS / 1000.0, deadline - now))
+
+    reasons.append(_unknown_reason(wait_for, config, timeout_ms))
     return "unknown"
+
+
+def _unknown_reason(wait_for, config, timeout_ms):
+    """Explain why ``--check-session`` could not tell, in one sentence."""
+    if not config:
+        return (
+            "'%s' did not appear within %d ms and the profile has no signed_out "
+            "marker, so a sign-in screen cannot be told apart" % (wait_for, timeout_ms)
+        )
+    if not wait_for:
+        return (
+            "the profile has no wait_for selector and no sign-in marker appeared "
+            "within %d ms" % timeout_ms
+        )
+    return (
+        "neither wait_for %r nor a sign-in marker appeared within %d ms "
+        "(the page may be slower than --timeout, or the markers may have drifted)"
+        % (wait_for, timeout_ms)
+    )
 
 
 def _same_url(left, right):
@@ -1447,6 +1501,7 @@ def _scroll_limit_warning(warnings, section_name, rounds, rows):
 def _scroll_section(
     page, record_def, section_name, warnings, rows, scroll_def,
     timeout_ms=DEFAULT_TIMEOUT_MS, now=None, headerless=None, carry=None,
+    signed_out=None,
 ):
     """Scroll the rendered list and append the rows it newly shows.
 
@@ -1471,6 +1526,12 @@ def _scroll_section(
     so that the leading rows of the next round can be aligned with them (see
     ``_align_leading``). It is created here when the caller did not provide
     one and the record is a flat feed.
+
+    When *signed_out* is given, every round checks the page for the cabinet's
+    sign-in screen: the URL marker every round (it is already at hand), the
+    text marker only when the round added no rows (that read is a round trip).
+    A session that expires while the list is being scrolled therefore ends the
+    run as "signed out" (exit 6) instead of reporting a truncated history.
     """
     counter = headerless if headerless is not None else {"headerless_rows": 0}
     if carry is None and record_def.get("header"):
@@ -1512,6 +1573,9 @@ def _scroll_section(
     scrolled_warnings = []
 
     while rounds < max_rounds:
+        # The URL is free to look at: every round. The body text is read only
+        # when a round added nothing (below), where the extra trip is due.
+        _raise_if_signed_out(page, signed_out, text=False)
         try:
             scroll_by(step_px)
         except Exception as exc:
@@ -1526,6 +1590,7 @@ def _scroll_section(
             page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms,
             now=now, counter=counter, carry=carry,
         )
+        _raise_if_signed_out(page, signed_out, text=not added)
 
         if _reached_date(rows, stop_before):
             stop = "date"
@@ -1564,6 +1629,7 @@ def _scroll_section(
                 try:
                     buttons[0].click()
                 except Exception as exc:
+                    _raise_if_signed_out(page, signed_out)
                     warnings.append(
                         "%s: load-more click failed (%s)" % (section_name, exc)
                     )
@@ -1579,6 +1645,7 @@ def _scroll_section(
                     page, record_def, section_name, scrolled_warnings, rows, seen, timeout_ms,
                     now=now, counter=counter, carry=carry,
                 )
+                _raise_if_signed_out(page, signed_out, text=not added)
                 if _reached_date(rows, stop_before):
                     stop = "date"
                     break
@@ -1727,7 +1794,7 @@ def _rows_signature(page, row_selector, items_selector=None):
 
 def _paginate_section(
     page, record_def, section_name, warnings, rows, pages_def,
-    timeout_ms=DEFAULT_TIMEOUT_MS, now=None,
+    timeout_ms=DEFAULT_TIMEOUT_MS, now=None, signed_out=None,
 ):
     """Walk a history split into numbered pages and append their rows.
 
@@ -1773,6 +1840,13 @@ def _paginate_section(
     (``"pages"``), ``pages`` (how many pages were read), ``clicks``, ``rows``,
     ``stop``, ``oldest_date``, ``headerless_rows`` (always 0 here), ``complete``
     and ``recheck`` (``"same"``, ``"changed"``, ``"failed"`` or ``"skipped"``).
+
+    When *signed_out* is given, the page is checked for the cabinet's
+    sign-in screen after every click — right after the advance wait (also
+    when that wait failed) and again before the page is extracted — and right
+    after the first-page recheck navigation. A session that expires mid-walk
+    therefore ends the run as "signed out" (exit 6), never as a truncated
+    history (exit 5).
     """
     next_selector = pages_def["next_selector"]
     active_selector = pages_def["active_selector"]
@@ -1908,6 +1982,7 @@ def _paginate_section(
         try:
             arrow.click()
         except Exception as exc:
+            _raise_if_signed_out(page, signed_out)
             warnings.append("%s: next-page click failed (%s)" % (section_name, exc))
             stop = "error"
             break
@@ -1930,6 +2005,9 @@ def _paginate_section(
                     break
             if attempt + 1 < polls:
                 time.sleep(_PAGE_POLL_MS / 1000.0)
+        # A session that expired on this click shows the sign-in screen: that
+        # is "nobody is signed in", not "the page did not advance".
+        _raise_if_signed_out(page, signed_out)
         if not advanced and not number_moved:
             warnings.append(
                 "%s: page did not advance past %d" % (section_name, previous_number)
@@ -1940,6 +2018,9 @@ def _paginate_section(
         if settle_ms > 0:
             time.sleep(settle_ms / 1000.0)
 
+        # The cabinet may also swap in the sign-in page a beat after the click,
+        # once the content has settled: check again before extracting it.
+        _raise_if_signed_out(page, signed_out)
         next_rows = _extract_rows_stable(
             page, record_def, section_name, warnings, timeout_ms=timeout_ms, now=now
         )
@@ -2005,6 +2086,9 @@ def _paginate_section(
             recheck = "failed"
             short_page = True
         else:
+            # The recheck is a fresh navigation: a session that expired during
+            # the walk lands on the sign-in screen here.
+            _raise_if_signed_out(page, signed_out)
             wait_for = record_def.get("wait_for")
             if wait_for:
                 try:
@@ -2015,6 +2099,7 @@ def _paginate_section(
                     warnings.append(
                         "waited for %r but it did not appear (%s)" % (wait_for, exc)
                     )
+            _raise_if_signed_out(page, signed_out)
             try:
                 recheck_rows = _extract_rows_stable(
                     page, record_def, section_name, warnings, timeout_ms=timeout_ms, now=now
@@ -2161,6 +2246,7 @@ def extract_section(
         results, info = _scroll_section(
             page, record_def, section_name, warnings, results, scroll_def,
             timeout_ms=timeout_ms, now=now, headerless=headerless, carry=carry,
+            signed_out=signed_out,
         )
         short = _short_days(
             results, (carry or {}).get("day_totals"), scroll_def.get("stop_before_date")
@@ -2185,7 +2271,7 @@ def extract_section(
     if pages_def:
         results, info = _paginate_section(
             page, record_def, section_name, warnings, results, pages_def,
-            timeout_ms=timeout_ms, now=now,
+            timeout_ms=timeout_ms, now=now, signed_out=signed_out,
         )
         if scroll_info is not None:
             scroll_info.update(info)

@@ -26,7 +26,10 @@ sys.path.insert(0, HERE)
 
 from bank_collector import cli  # noqa: E402
 from bank_collector import report as report_mod  # noqa: E402
-from bank_collector.collect import collect  # noqa: E402
+from bank_collector.collect import (  # noqa: E402
+    _read_active_page_number,
+    collect,
+)
 from bank_collector.profiles import ProfileError, load_profile  # noqa: E402
 from fake_page import FakePage  # noqa: E402
 
@@ -293,6 +296,38 @@ class ExpiringCabinet(PagedPage):
                 self.url = url
                 self._set_root(self.LOGIN_PAGE)
                 return None
+        return PagedPage.goto(self, url, **kwargs)
+
+
+class LatePaginationPage(PagedPage):
+    """The pagination renders a few reads after the operation rows do."""
+
+    def __init__(self, htmls, lag):
+        PagedPage.__init__(self, htmls)
+        self.lag = lag
+        self.active_reads = 0
+
+    def query_all(self, selector):
+        if selector == ACTIVE_SELECTOR:
+            self.active_reads += 1
+            if self.active_reads <= self.lag:
+                return []
+        return PagedPage.query_all(self, selector)
+
+
+class BrokenRecheckPage(PagedPage):
+    """The first-page recheck cannot even navigate back to the record URL."""
+
+    def __init__(self, htmls):
+        PagedPage.__init__(self, htmls)
+        self.history_gotos = 0
+
+    def goto(self, url, **kwargs):
+        if url.rstrip("/") == HISTORY_URL.rstrip("/"):
+            self.history_gotos += 1
+            if self.history_gotos >= 2:
+                self.visited.append(url)
+                raise RuntimeError("navigation failed")
         return PagedPage.goto(self, url, **kwargs)
 
 
@@ -1179,3 +1214,65 @@ def test_rows_that_arrive_after_the_page_number_are_still_the_new_page():
     assert [row["title"]["value"] for row in result["transactions"]] == ["Магазин"] * 3 + ["Кофе"] * 3
     assert [row["date"]["value"] for row in result["transactions"]] == ["2026-10-24"] * 3 + ["2026-10-23"] * 3
     assert _warnings(result) == []
+
+
+# ---------------------------------------------------------------------------
+# The first page-number read is retried, the failure message comes from the
+# read that failed, and a recheck that cannot navigate is "failed"
+# ---------------------------------------------------------------------------
+
+
+def test_the_first_page_number_is_retried_until_the_pagination_renders():
+    page = LatePaginationPage(
+        [_history(1, [("24 октября, суббота", _ops(3))], last=True)], lag=3
+    )
+
+    result = collect(
+        page, _profile(page_size=3, stop_before_date=None, wait_ms=2000), now=NOW
+    )
+
+    assert page.active_reads == 4, "three unreadable reads, then the number"
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
+
+
+class _NoPageNumber(object):
+    """A page whose active-page selector matches nothing; counts its queries."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def query_all(self, selector):
+        self.calls += 1
+        return []
+
+
+def test_the_unreadable_number_message_comes_from_the_single_failed_read():
+    page = _NoPageNumber()
+
+    number, message = _read_active_page_number(page, ACTIVE_SELECTOR)
+
+    assert number is None
+    assert "matched 0 elements" in message
+    assert page.calls == 1, "the reason is built from the read that failed"
+
+
+def test_a_recheck_that_cannot_navigate_is_failed_not_skipped():
+    page = BrokenRecheckPage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            _history(
+                2,
+                [("23 октября, пятница", [_operation("Кофе", "−250 ₽")] * 3)],
+                last=True,
+            ),
+        ]
+    )
+
+    result = collect(page, _profile(page_size=3), now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "failed"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == ["transactions: first page recheck failed (navigation failed)"]

@@ -25,6 +25,9 @@ objects:
     ``wait_for_selector(sel, timeout=...)`` -- wait until the SPA rendered
     ``query_all(selector)``        -- list of elements matching a CSS selector
     ``content()``                  -- optional, the rendered HTML (snapshots)
+    ``inner_text(selector)``       -- optional, the visible text of the page
+                                      (used by ``signed_out`` markers and
+                                      ``--check-session``)
     ``url``                        -- the URL that is currently open
     ``scroll_by(dy)``              -- optional, scroll the viewport by *dy*
                                       pixels (read-only: no click, no DOM
@@ -90,6 +93,15 @@ run is reported incomplete too. The pages are disjoint, so their rows are
 appended as they are, without cross-page dedup.
 ``pages`` cannot be combined with ``header``: a numbered-page list does not
 carry day headers across page boundaries.
+
+When the profile has a ``signed_out`` block, every page the driver opens — the
+profile's own URL and each record's page — is checked for the cabinet's
+sign-in screen: a URL-path substring and/or a visible text (case-folded,
+whitespace collapsed).  A match stops the run at once, before any further
+navigation, click or read: the result carries no rows and a ``signed_out``
+marker, so the caller can tell "the owner is not signed in" from "the
+selectors broke".  ``check_session`` uses the same markers to answer that
+question without reading a single record.
 """
 
 import re
@@ -97,15 +109,18 @@ import time
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 __all__ = [
     "collect",
+    "check_session",
     "extract_section",
     "extract_record",
     "parse_money",
     "parse_ru_date",
     "normalise_value",
+    "signed_out_marker",
     "DEFAULT_TIMEOUT_MS",
 ]
 
@@ -115,6 +130,14 @@ DEFAULT_TIMEOUT_MS = 20000
 #: cabinets render day headers in Moscow time, so "Сегодня" must be resolved
 #: against the Moscow calendar day, not the UTC one.
 DEFAULT_TIMEZONE = "Europe/Moscow"
+
+#: The warning a run adds when the cabinet shows its sign-in screen instead of
+#: the data.  The marker says WHAT matched, so that a broken marker is visible.
+SIGNED_OUT_WARNING = "signed out: the cabinet shows its sign-in screen (%s)"
+
+#: How often ``--check-session`` looks at the page while it waits for either
+#: the profile's ``wait_for`` selector or a ``signed_out`` marker.
+_SESSION_POLL_MS = 250
 
 # Money-like text: an optional sign, a number with (optional) thousands
 # separators and (optional) a two-digit fraction, then an optional currency
@@ -857,6 +880,101 @@ def _records_from_snapshot(
     return leading_results + results
 
 
+class _SignedOut(Exception):
+    """The cabinet showed its sign-in screen: stop before any further read."""
+
+    def __init__(self, marker):
+        Exception.__init__(self, marker)
+        self.marker = marker
+
+
+def signed_out_marker(page, config):
+    """Describe the sign-in marker the page matches, or return ``None``.
+
+    *config* is the profile's ``signed_out`` block (or ``None``).  A URL
+    marker matches when it is a substring of the page's URL **path**; a text
+    marker matches when it occurs in the page body after case-folding and
+    whitespace collapsing.  The returned string names the marker that
+    matched, so the warning tells which clue fired.
+    """
+    if not config:
+        return None
+
+    url = ""
+    try:
+        url = str(getattr(page, "url", "") or "")
+    except Exception:  # pragma: no cover - a dead page is not a marker
+        url = ""
+    if url:
+        try:
+            path = urlsplit(url).path or url
+        except ValueError:  # pragma: no cover - a malformed URL is not a marker
+            path = url
+        for needle in config.get("url_contains") or []:
+            if needle in path:
+                return "url contains %r" % needle
+
+    needles = config.get("text") or []
+    if needles:
+        try:
+            body = page.inner_text("body")
+        except Exception:  # pragma: no cover - an unreadable body is not a marker
+            body = ""
+        if body:
+            folded = _collapsed(body).casefold()
+            for needle in needles:
+                marker = _collapsed(needle)
+                if marker and marker.casefold() in folded:
+                    return "text %r" % marker
+
+    return None
+
+
+def _raise_if_signed_out(page, config):
+    """Raise :class:`_SignedOut` when the page is the cabinet's sign-in screen."""
+    marker = signed_out_marker(page, config)
+    if marker:
+        raise _SignedOut(marker)
+
+
+def _selector_present(page, selector):
+    """True when *selector* matches at least one element right now."""
+    try:
+        return bool(page.query_all(selector))
+    except Exception:  # pragma: no cover - a closed page answers nothing
+        return False
+
+
+def check_session(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS):
+    """Tell whether the attached browser is still signed in to the cabinet.
+
+    Only the profile's own URL is opened: no unlock code, no record page, no
+    click and no scroll.  For up to *timeout_ms* the page is polled for the
+    profile's ``wait_for`` selector and for its ``signed_out`` markers.
+
+    Returns ``"ok"`` (the cabinet rendered), ``"signed-out"`` (a sign-in
+    marker matched) or ``"unknown"`` (neither appeared, or the page could not
+    be opened).  A profile without a ``signed_out`` block can only ever give
+    ``ok`` or ``unknown``.
+    """
+    try:
+        page.goto(profile["url"])
+    except Exception:
+        return "unknown"
+
+    config = profile.get("signed_out")
+    wait_for = profile.get("wait_for")
+    polls = max(1, (timeout_ms + _SESSION_POLL_MS - 1) // _SESSION_POLL_MS)
+    for attempt in range(polls):
+        if signed_out_marker(page, config):
+            return "signed-out"
+        if wait_for and _selector_present(page, wait_for):
+            return "ok"
+        if attempt + 1 < polls:
+            time.sleep(_SESSION_POLL_MS / 1000.0)
+    return "unknown"
+
+
 def _same_url(left, right):
     """Compare two URLs ignoring a trailing slash."""
     if not left or not right:
@@ -864,13 +982,20 @@ def _same_url(left, right):
     return left.rstrip("/") == right.rstrip("/")
 
 
-def visit_record(page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TIMEOUT_MS):
+def visit_record(
+    page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TIMEOUT_MS, signed_out=None
+):
     """Open the page of a record, if the record asks for a page of its own.
 
     A record with a ``url`` that differs from the page that is currently open
     is read from that page: the driver opens it with a plain ``goto`` and
     waits for the record's ``wait_for`` selector. Visited URLs are appended
     to *visited* (in order, without duplicates).
+
+    When *signed_out* is given (the profile's ``signed_out`` block), the page
+    is checked for its sign-in screen right after the navigation and again
+    after the wait: a run must stop there at once, without reading a record
+    off the sign-in page.
     """
     url = record_def.get("url")
     navigated = False
@@ -885,6 +1010,7 @@ def visit_record(page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TI
             navigated = True
             if visited is not None and not any(_same_url(item, url) for item in visited):
                 visited.append(url)
+            _raise_if_signed_out(page, signed_out)
 
     wait_for = record_def.get("wait_for")
     if wait_for:
@@ -892,6 +1018,7 @@ def visit_record(page, record_def, warnings, visited=None, timeout_ms=DEFAULT_TI
             page.wait_for_selector(wait_for, timeout=timeout_ms)
         except Exception as exc:
             warnings.append("waited for %r but it did not appear (%s)" % (wait_for, exc))
+    _raise_if_signed_out(page, signed_out)
     return navigated
 
 
@@ -1521,6 +1648,32 @@ def _element_disabled(element):
     return _collapsed(aria or "").casefold() == "true"
 
 
+def _read_active_page_number(page, selector):
+    """Read the current page number and, when it fails, say why.
+
+    Returns ``(number, None)`` when exactly one element matches *selector* and
+    its whole text is an integer, and ``(None, reason)`` otherwise.  One read
+    answers both, so the reason describes the DOM that actually failed instead
+    of a second query that may see a different one.
+    """
+    try:
+        matches = page.query_all(selector)
+    except Exception as exc:
+        return None, "active-page selector %r failed (%s)" % (selector, exc)
+    if len(matches) != 1:
+        return None, (
+            "active-page selector %r matched %d elements, not one page number"
+            % (selector, len(matches))
+        )
+    try:
+        text = _collapsed(matches[0].text_content())
+    except Exception as exc:  # pragma: no cover - a re-render can kill a handle
+        return None, "reading %r failed (%s)" % (selector, exc)
+    if not text.isdigit():
+        return None, "active-page selector %r holds %r, not a page number" % (selector, text)
+    return int(text), None
+
+
 def _active_page_number(page, selector):
     """The current page number, or ``None`` when it cannot be read.
 
@@ -1528,35 +1681,7 @@ def _active_page_number(page, selector):
     integer. More or fewer matches, or any other text, give ``None``: the
     driver then never clicks, because it cannot tell which page it is on.
     """
-    try:
-        matches = page.query_all(selector)
-    except Exception:  # pragma: no cover - defensive
-        return None
-    if len(matches) != 1:
-        return None
-    try:
-        text = _collapsed(matches[0].text_content())
-    except Exception:  # pragma: no cover - a re-render can kill a handle
-        return None
-    return int(text) if text.isdigit() else None
-
-
-def _active_page_message(page, selector):
-    """Say why the current page number could not be read."""
-    try:
-        matches = page.query_all(selector)
-    except Exception as exc:
-        return "active-page selector %r failed (%s)" % (selector, exc)
-    if len(matches) != 1:
-        return (
-            "active-page selector %r matched %d elements, not one page number"
-            % (selector, len(matches))
-        )
-    try:
-        text = _collapsed(matches[0].text_content())
-    except Exception as exc:  # pragma: no cover - a re-render can kill a handle
-        return "reading %r failed (%s)" % (selector, exc)
-    return "active-page selector %r holds %r, not a page number" % (selector, text)
+    return _read_active_page_number(page, selector)[0]
 
 
 def _pages_limit_warning(warnings, section_name, pages, rows):
@@ -1613,9 +1738,11 @@ def _paginate_section(
     carrying ``disabled`` (or ``aria-disabled="true"``) ends the history. The
     current page number is read from ``pages.active_selector`` before the
     click and must equal the number of pages read so far; the first page must
-    read 1 — an unreadable number is an error too, never an assumption that
-    the list opened where it should. The page number must move to the next
-    integer afterwards, together with at least one rendered row.
+    read 1. An unreadable number is retried for up to ``pages.wait_ms`` (the
+    pagination may render a beat after the rows) and is then an error, never
+    an assumption that the list opened where it should. The page number must
+    move to the next integer afterwards, together with at least one rendered
+    row.
 
     The pages are disjoint, so all their rows are kept without cross-page
     dedup: two equal coffees on two pages are two operations. A page whose
@@ -1635,10 +1762,12 @@ def _paginate_section(
     After the walk ends with stop "date" or "end", the record's URL is
     revisited and the first page is re-read to detect history shifts
     (an operation arriving mid-run shifts every page by one). The multiset of
-    row keys is compared with the first page read at the start. A re-read that
-    yields no rows at all (expired session, a login page, a failed load) is
-    not a "changed" page: it is reported as ``"failed"`` and makes the run
-    incomplete, because nothing can be proven about the start of the history.
+    row keys is compared with the first page read at the start. A recheck that
+    cannot even open the page again, or that yields no rows at all (expired
+    session, a login page, a failed load), is reported as ``"failed"`` and
+    makes the run incomplete, because nothing can be proven about the start of
+    the history. ``"skipped"`` means only that no recheck was attempted: the
+    walk stopped with ``error``/``limit`` or the record has no ``url``.
 
     Returns ``(rows, info)`` where *info* mirrors the scroll block: ``mode``
     (``"pages"``), ``pages`` (how many pages were read), ``clicks``, ``rows``,
@@ -1673,10 +1802,21 @@ def _paginate_section(
     # Check that the first page reads as page 1. An unreadable number is not
     # "probably page 1": a walk that then stops at the date limit or on a
     # disabled arrow could otherwise look complete without any anchor at all.
-    first_number = _active_page_number(page, active_selector)
+    # The pagination may render a beat after the rows, so an unreadable number
+    # is retried for up to ``wait_ms`` before the run gives up on it.
+    first_number = None
+    first_error = None
+    for attempt in range(polls):
+        first_number, first_error = _read_active_page_number(page, active_selector)
+        if first_number is not None:
+            break
+        if attempt + 1 < polls:
+            time.sleep(_PAGE_POLL_MS / 1000.0)
     if first_number != 1:
         if first_number is None:
-            message = _active_page_message(page, active_selector)
+            message = first_error or (
+                "active-page selector %r could not be read" % active_selector
+            )
         else:
             message = "list did not open on page 1 (active page is %d)" % first_number
         warnings.append("%s: %s" % (section_name, message))
@@ -1726,10 +1866,15 @@ def _paginate_section(
             stop = "limit"
             break
 
-        previous_number = _active_page_number(page, active_selector)
+        previous_number, previous_error = _read_active_page_number(page, active_selector)
         if previous_number is None:
             warnings.append(
-                "%s: %s" % (section_name, _active_page_message(page, active_selector))
+                "%s: %s"
+                % (
+                    section_name,
+                    previous_error
+                    or ("active-page selector %r could not be read" % active_selector),
+                )
             )
             stop = "error"
             break
@@ -1854,8 +1999,10 @@ def _paginate_section(
             page.goto(record_url)
         except Exception as exc:
             # The page could not be opened again: the recheck cannot be made.
-            # Never claim completeness on an unverified first page.
+            # Never claim completeness on an unverified first page, and say
+            # that the recheck itself failed rather than that it was skipped.
             warnings.append("%s: first page recheck failed (%s)" % (section_name, exc))
+            recheck = "failed"
             short_page = True
         else:
             wait_for = record_def.get("wait_for")
@@ -1970,6 +2117,7 @@ def extract_section(
     timeout_ms=DEFAULT_TIMEOUT_MS,
     scroll_info=None,
     now=None,
+    signed_out=None,
 ):
     """Extract one section (``balances`` or ``transactions``) from *page*.
 
@@ -1986,7 +2134,14 @@ def extract_section(
     given — receives a small report about that run (the same ``scroll`` block
     of the report, with ``mode: "pages"`` for a paginated one).
     """
-    visit_record(page, record_def, warnings, visited=visited, timeout_ms=timeout_ms)
+    visit_record(
+        page,
+        record_def,
+        warnings,
+        visited=visited,
+        timeout_ms=timeout_ms,
+        signed_out=signed_out,
+    )
 
     headerless = {"headerless_rows": 0}
     scroll_def = record_def.get("scroll")
@@ -2061,9 +2216,16 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     walk stopped (``end`` is a disabled arrow — the list's definitive end of
     history) and whether the re-read first page matched the one read at the
     start (``recheck``: ``same``; ``changed`` when a non-empty page differs;
-    ``failed`` when it yielded no rows at all — an expired session or a failed
-    load, which also leaves the run incomplete; ``skipped`` when no recheck
-    was possible).
+    ``failed`` when the page could not be opened again or it yielded no rows
+    at all — an expired session or a failed load, which also leaves the run
+    incomplete; ``skipped`` only when the walk stopped with ``error``/``limit``
+    or the record has no ``url``).
+
+    When the profile has a ``signed_out`` block and the page matches it (the
+    cabinet redirected to its sign-in screen) the run stops at once, before
+    any further navigation or click: the result then holds no balances and no
+    transactions, the ``signed_out`` marker that matched, and a warning
+    ``signed out: the cabinet shows its sign-in screen (...)``.
 
     *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
     relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field
@@ -2075,6 +2237,10 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     url = profile["url"]
     visited = []
     scroll_sections = {}
+    signed_out_config = profile.get("signed_out")
+    signed_out = None
+    balances = []
+    transactions = []
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -2083,58 +2249,75 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     local_now = _local_now(now, profile, warnings)
 
     try:
-        page.goto(url)
-    except Exception as exc:
-        raise RuntimeError("cannot open %s: %s" % (url, exc))
-    visited.append(url)
-
-    wait_for = profile.get("wait_for")
-    if wait_for:
         try:
-            page.wait_for_selector(wait_for, timeout=timeout_ms)
+            page.goto(url)
         except Exception as exc:
-            warnings.append("waited for %r but it did not appear (%s)" % (wait_for, exc))
+            raise RuntimeError("cannot open %s: %s" % (url, exc))
+        visited.append(url)
 
-    balances = []
-    for record_def in profile.get("balances") or []:
-        info = {}
-        balances.extend(
-            extract_section(
-                page,
-                record_def,
-                "balances",
-                warnings,
-                visited=visited,
-                timeout_ms=timeout_ms,
-                scroll_info=info,
-                now=local_now,
+        # The sign-in screen is checked right after the URL was opened and
+        # again after the wait: reading a sign-in page as if it were the
+        # cabinet would only produce empty rows and misleading warnings.
+        _raise_if_signed_out(page, signed_out_config)
+
+        wait_for = profile.get("wait_for")
+        if wait_for:
+            try:
+                page.wait_for_selector(wait_for, timeout=timeout_ms)
+            except Exception as exc:
+                warnings.append("waited for %r but it did not appear (%s)" % (wait_for, exc))
+        _raise_if_signed_out(page, signed_out_config)
+
+        for record_def in profile.get("balances") or []:
+            info = {}
+            balances.extend(
+                extract_section(
+                    page,
+                    record_def,
+                    "balances",
+                    warnings,
+                    visited=visited,
+                    timeout_ms=timeout_ms,
+                    scroll_info=info,
+                    now=local_now,
+                    signed_out=signed_out_config,
+                )
             )
-        )
-        if info:
-            scroll_sections["balances"] = info
+            if info:
+                scroll_sections["balances"] = info
 
-    transactions = []
-    for record_def in profile.get("transactions") or []:
-        info = {}
-        transactions.extend(
-            extract_section(
-                page,
-                record_def,
-                "transactions",
-                warnings,
-                visited=visited,
-                timeout_ms=timeout_ms,
-                scroll_info=info,
-                now=local_now,
+        for record_def in profile.get("transactions") or []:
+            info = {}
+            transactions.extend(
+                extract_section(
+                    page,
+                    record_def,
+                    "transactions",
+                    warnings,
+                    visited=visited,
+                    timeout_ms=timeout_ms,
+                    scroll_info=info,
+                    now=local_now,
+                    signed_out=signed_out_config,
+                )
             )
-        )
-        if info:
-            scroll_sections["transactions"] = info
+            if info:
+                scroll_sections["transactions"] = info
+    except _SignedOut as exc:
+        # Nothing extracted: a partial screen of a sign-in page is not the
+        # cabinet.  The caller reports the marker and exits with its own code.
+        signed_out = exc.marker
+        balances = []
+        transactions = []
+        scroll_sections = {}
 
-    if not balances:
-        warnings.append("no balances extracted")
-    if not transactions:
-        warnings.append("no transactions extracted")
+    if signed_out:
+        warnings.append(SIGNED_OUT_WARNING % signed_out)
+    else:
+        if not balances:
+            warnings.append("no balances extracted")
+        if not transactions:
+            warnings.append("no transactions extracted")
 
     # ``fetched_at`` stays the UTC instant whatever the cabinet's timezone is.
     if isinstance(now, datetime):
@@ -2153,6 +2336,10 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
         "transactions": transactions,
         "warnings": warnings,
     }
+
+    if signed_out:
+        result["signed_out"] = signed_out
+        return result
 
     scroll_info = scroll_sections.get("transactions") or scroll_sections.get("balances")
     if scroll_info:

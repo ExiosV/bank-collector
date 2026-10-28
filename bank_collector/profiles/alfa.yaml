@@ -75,9 +75,10 @@ transactions:
 # The cabinet's static "secret code" screen (NOT an SMS code): after a long
 # absence Alfa asks for the permanent cabinet code it already knows. The
 # selectors below were taken from the live screen on 2026-10-24
-# (private.auth.alfabank.ru/passport/cerberus-mini/dashboard/pincode), but
-# the end-to-end entry is NOT proven yet: no code was typed on purpose
-# (the screen showed "Осталось 2 попытки"), so only the markup is verified.
+# (private.auth.alfabank.ru/passport/cerberus-mini/dashboard/pincode). The
+# end-to-end entry was first observed in the scheduled devicex2 run of
+# 2026-10-28 03:03Z: the screen appeared, the code was entered, the dashboard
+# opened and the report was written (exit 0).
 # The section is used solely by `bank-collector --enter-code`; the code itself
 # lives in the file named by `code_file` (mode 0600, outside the repository).
 unlock:
@@ -91,4 +92,6 @@ unlock:
   code_file: "~/.config/bank-collector/alfa-code"
   max_attempts: 1
   min_attempts_left: 3
+  # Verified end to end in the scheduled run of 2026-10-28 03:03Z (code
+  # entered, dashboard opened, report written, exit 0).
   status: verified

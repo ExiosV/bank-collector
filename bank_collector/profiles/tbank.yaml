@@ -78,9 +78,19 @@
 bank: tbank
 status: verified
 timezone: Europe/Moscow
-notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: the leading rows of a round are dated by their overlap with the previous round, and rows with no overlap are skipped, counted and reported (the run is then incomplete). Verified 2026-10-27 with the shipped code (4bb5b03): 324 operations back to 2025-12-31; every day is checked at run time against the cabinet's own expense total (no short day), by hand 81 of 86 such days match exactly and the other 5 by one bank-excluded operation each; income not checked numerically. The first and last months of the file are partial. Own-transfer titles are not labelled (observed titles listed in README, not exhaustive) and must be filtered downstream. Sum only data/tbank.json with scroll.complete true, never a .partial.json. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs."
+notes: "Read-only profile of https://www.tbank.ru/mybank/operations/ (probed 2026-10-27: goto + read + wheel scrolling only, no clicks). Flat feed: day headers and operations are sibling <li> rows; the header carries the date. The feed is virtualised (about 25-31 rendered rows), so a header may scroll out while its operations remain: the leading rows of a round are dated by their overlap with the previous round, and rows with no overlap are skipped, counted and reported (the run is then incomplete). Verified 2026-10-27 with the shipped code (4bb5b03): 324 operations back to 2025-12-31; every day is checked at run time against the cabinet's own expense total (no short day), by hand 81 of 86 such days match exactly and the other 5 by one bank-excluded operation each; income not checked numerically. The first and last months of the file are partial. Own-transfer titles are not labelled (observed titles listed in README, not exhaustive) and must be filtered downstream. Sum only data/tbank.json with scroll.complete true, never a .partial.json. Every run re-reads the whole history (down to stop_before_date) and rewrites the output file, so never append runs. Sign-in markers: the run on 2026-10-28 06:00 met a sign-in screen (exit 4) but the URL was not recorded; signed_out.url_contains ['/login'] is the generic path marker and is NOT verified against T-Bank."
 url: "https://www.tbank.ru/mybank/operations/"
 wait_for: "[data-qa-type=atom-operations-feed-operation-root]"
+
+# What a signed-out cabinet looks like here is NOT established: on 2026-10-28
+# at 06:00 a run met a sign-in screen (the old code reported exit 4), but the
+# exact URL was not recorded. Only the generic "/login" path is listed below,
+# and that marker is UNVERIFIED for T-Bank: "id.tbank.ru" and "/auth/" are
+# left out because nothing in this repository documents them. If the real
+# screen lives elsewhere, --check-session answers "unknown" rather than
+# "signed-out"; replacing an invented marker with a wrong one would be worse.
+signed_out:
+  url_contains: ["/login"]
 
 balances: []
 

@@ -12,6 +12,17 @@ Exit codes
     reach ``stop_before_date`` (or hit ``max_rounds``/``max_pages``), or a
     fuller snapshot on disk was kept and the new report went to
     ``<bank>.partial.json`` — not a success either way
+6   the cabinet showed its sign-in screen: nobody is signed in. The run stops
+    before any record is read (the marker comes from the profile's
+    ``signed_out`` block) and prints one line ``SIGNED_OUT: <bank>``.
+    ``--check-session`` reports the same state as ``SESSION: signed-out
+    <bank>``
+
+``--check-session`` opens only the profile's URL — no unlock code, no record
+page, no click and no scroll — waits for its ``wait_for`` selector or a
+``signed_out`` marker (up to ``--timeout``) and prints exactly one line:
+``SESSION: ok <bank>`` (exit 0), ``SESSION: signed-out <bank>`` (exit 6) or
+``SESSION: unknown <bank>`` (exit 4, neither appeared). It writes no report.
 
 ``--import-statement PATH`` reads a statement the owner downloaded by hand
 from the cabinet. It needs ``--bank`` and no browser: the file is read from
@@ -44,7 +55,7 @@ import sys
 import time
 
 from . import __version__, report as report_mod
-from .collect import DEFAULT_TIMEOUT_MS, collect
+from .collect import DEFAULT_TIMEOUT_MS, check_session, collect
 from .connect import (
     CDP_URL_ENV,
     DEFAULT_CDP_URL,
@@ -70,6 +81,24 @@ EXIT_NO_BROWSER = 2
 EXIT_BAD_PROFILE = 3
 EXIT_NOTHING = 4
 EXIT_INCOMPLETE = 5
+EXIT_SIGNED_OUT = 6
+
+#: The line the scheduler parses when nobody is signed in.
+SIGNED_OUT_LINE = "SIGNED_OUT: %s"
+
+#: The one line ``--check-session`` prints, per status.
+SESSION_LINES = {
+    "ok": "SESSION: ok %s",
+    "signed-out": "SESSION: signed-out %s",
+    "unknown": "SESSION: unknown %s",
+}
+
+#: What ``--check-session`` returns for each status.
+SESSION_EXITS = {
+    "ok": EXIT_OK,
+    "signed-out": EXIT_SIGNED_OUT,
+    "unknown": EXIT_NOTHING,
+}
 
 #: The line that is printed on stdout when the code screen was handled.
 UNLOCK_OK = "UNLOCK: экран «Секретный код» — код введён"
@@ -98,11 +127,16 @@ def build_parser():
             "press of the screen's submit button."
         ),
         epilog=(
+            "Exit codes: 0 ok; 2 no browser; 3 bad profile or code file; "
+            "4 nothing extracted (or SESSION: unknown); 5 incomplete history; "
+            "6 signed out (SIGNED_OUT / SESSION: signed-out).\n"
+            "\n"
             "Examples:\n"
             "  bank-collector --bank example --cdp-url http://127.0.0.1:9222\n"
             "  bank-collector --bank example --out data --csv\n"
             "  bank-collector --bank alfa --enter-code --code-file ~/.config/bank-collector/alfa-code\n"
             "  bank-collector --bank alfa --import-statement ~/Downloads/statement.csv\n"
+            "  bank-collector --bank raif --check-session\n"
             "  bank-collector --list-profiles\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -172,6 +206,15 @@ def build_parser():
             "do not scroll the rendered list, even when the profile asks for it "
             "(the first rendered screen only; does not stop a pages walk; "
             "remove the pages block from the profile to read only the first page)"
+        ),
+    )
+    parser.add_argument(
+        "--check-session",
+        action="store_true",
+        help=(
+            "open only the profile URL and print one line: SESSION: ok <bank>, "
+            "SESSION: signed-out <bank> or SESSION: unknown <bank> (exit 0/6/4); "
+            "types nothing, clicks nothing and writes no report"
         ),
     )
     parser.add_argument(
@@ -425,12 +468,13 @@ def _clear_code_failure(args):
     return EXIT_OK
 
 
-def _exit_code(report, written, kept, stream=None):
+def _exit_code(report, written, kept, stream=None, signed_out=None):
     """The exit code of a finished run, with the line that explains it.
 
     The daily job trusts only this code: anything but 0 is retried and then
-    reported, and only a 0 is uploaded. The order matters — an empty run is
-    ``EXIT_NOTHING`` even when a fuller file was kept.
+    reported, and only a 0 is uploaded. The order matters — a run that met the
+    sign-in screen is ``EXIT_SIGNED_OUT`` even when a fuller file was kept,
+    and an empty run is ``EXIT_NOTHING`` even when a fuller file was kept.
     """
     stream = stream or sys.stderr
     if kept:
@@ -439,6 +483,11 @@ def _exit_code(report, written, kept, stream=None):
             "(%d transactions): it was kept, the new report is in %s\n"
             % (kept, len(report["transactions"]), written[0])
         )
+    if signed_out:
+        # Not a selector problem: nobody is signed in. The caller prints the
+        # stable SIGNED_OUT line; "nothing was extracted" would blame the
+        # profile and send the owner to the wrong place.
+        return EXIT_SIGNED_OUT
     if not report["balances"] and not report["transactions"]:
         stream.write(
             "nothing was extracted — check the selectors in the profile "
@@ -523,6 +572,14 @@ def main(argv=None):
         # An empty --cdp-url "$CDP" in a script must not fall through silently.
         parser.error("--cdp-url is empty")
 
+    if args.check_session and (
+        args.enter_code or args.import_statement or args.clear_code_failure
+    ):
+        parser.error(
+            "--check-session cannot be combined with --enter-code, "
+            "--import-statement or --clear-code-failure"
+        )
+
     if args.list_profiles:
         _print_profiles()
         return EXIT_OK
@@ -585,6 +642,15 @@ def main(argv=None):
             return EXIT_NO_BROWSER
         page = PageAdapter(raw_page, timeout_ms=args.timeout)
 
+        if args.check_session:
+            # Read-only probe: only the profile URL is opened. No unlock, no
+            # record page, no click, no scroll and no report.
+            status = check_session(page, profile, timeout_ms=args.timeout)
+            bank = profile.get("bank") or args.bank
+            sys.stdout.write((SESSION_LINES[status] % bank) + "\n")
+            sys.stdout.flush()
+            return SESSION_EXITS[status]
+
         collect_target = page
         if args.enter_code:
             fatal = _unlock(page, profile, args)
@@ -594,22 +660,27 @@ def main(argv=None):
 
         collected = collect(collect_target, profile, timeout_ms=args.timeout)
         report = report_mod.build_report(collected)
+        bank = profile.get("bank") or args.bank
+        signed_out = collected.get("signed_out")
 
-        if args.snapshot:
-            paths, error = _snapshot(page, args.out, profile.get("bank") or args.bank)
+        # A sign-in screen is not the cabinet: no snapshot of it and no empty
+        # report on stdout, just the files (a fuller one is never replaced)
+        # and the one line the scheduler watches for.
+        if args.snapshot and not signed_out:
+            paths, error = _snapshot(page, args.out, bank)
             if error:
                 sys.stderr.write("warning: %s\n" % error)
             for path in paths:
                 sys.stdout.write("snapshot: %s\n" % path)
 
-        written, kept = _write_outputs(report, args.out, args.format, profile.get("bank") or args.bank)
+        written, kept = _write_outputs(report, args.out, args.format, bank)
         for path in written:
             sys.stdout.write("written: %s\n" % path)
 
-        if args.as_json:
+        if args.as_json and not signed_out:
             json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
             sys.stdout.write("\n")
-        if args.as_csv:
+        if args.as_csv and not signed_out:
             import csv as csv_mod
 
             writer = csv_mod.writer(sys.stdout)
@@ -629,7 +700,10 @@ def main(argv=None):
         for warning in report["warnings"]:
             sys.stderr.write("warning: %s\n" % warning)
 
-        return _exit_code(report, written, kept)
+        code = _exit_code(report, written, kept, signed_out=signed_out)
+        if code == EXIT_SIGNED_OUT:
+            sys.stdout.write((SIGNED_OUT_LINE % bank) + "\n")
+        return code
     finally:
         # Close the tab we opened ourselves, and never the person's browser.
         if own_page is not None:

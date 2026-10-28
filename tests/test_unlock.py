@@ -451,7 +451,9 @@ def test_alfa_profile_parses_with_miniyaml_and_pyyaml():
     with open(path, encoding="utf-8") as handle:
         raw = handle.read()
     parsed = miniyaml.safe_load(raw)
-    assert parsed["unlock"]["status"] == "verified"
+    assert parsed["unlock"]["status"] == "verified", (
+        "the code entry was observed end to end in the scheduled run of 2026-10-28"
+    )
     assert parsed["unlock"]["input_selector"] == (
         'form[class*="pincode-browser_form"] input[type="password"]'
     )

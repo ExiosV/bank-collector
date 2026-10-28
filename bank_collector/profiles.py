@@ -203,6 +203,21 @@ The keys of the section and what the validator accepts:
     screen nothing is typed at all.
 ``status``
     optional, ``verified`` or ``unverified`` like the status of the profile.
+
+An optional ``signed_out`` section names what the cabinet shows when nobody is
+signed in, so that a run stops at once and says "the session expired" instead
+of blaming the selectors::
+
+    signed_out:
+      url_contains: ["/login"]        # substrings of the page URL path
+      text: ["Войти в онлайн-банк"]   # visible texts of the sign-in screen
+
+At least one of the two lists must hold an entry (the other may be empty);
+a plain string is accepted as a one-element list.  The URL markers are matched as substrings of
+the page's URL path, the text markers against the page's body text
+(case-folded, whitespace collapsed).  They only describe the sign-in screen —
+like the rest of the profile they never carry a credential (the credential
+guard still rejects a key that looks like one).
 """
 
 import os
@@ -226,8 +241,18 @@ _PARSE_KINDS = ("ru_date",)
 
 _REQUIRED_KEYS = ("bank", "status", "url", "wait_for")
 _OPTIONAL_KEYS = ("balances", "transactions")
-_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + ("notes", "unlock", "timezone")
+_ALLOWED_TOP_KEYS = _REQUIRED_KEYS + _OPTIONAL_KEYS + (
+    "notes",
+    "unlock",
+    "signed_out",
+    "timezone",
+)
 _FIELD_KEYS = ("selector", "attr", "regex", "group", "parse", "optional")
+
+# The keys the optional ``signed_out`` section may carry.  It names what the
+# sign-in screen looks like — a substring of the URL path and/or a visible
+# text — never a credential.
+_SIGNED_OUT_KEYS = ("url_contains", "text")
 
 # The keys the optional ``unlock`` section may carry.  It describes how the
 # cabinet's static "secret code" screen is recognised — it never carries the
@@ -985,6 +1010,65 @@ def _normalise_unlock(section, where):
     }
 
 
+def _normalise_signed_out(section, where):
+    """Validate the optional ``signed_out`` section of a profile.
+
+    The section describes the cabinet's sign-in screen: a substring of the
+    URL path and/or a visible text that betrays it.  At least one of the two
+    lists must hold an entry; the other may be omitted or empty (``[]``).  A
+    plain string is accepted as a one-element list.  It never holds a
+    credential — an unknown key is rejected, and a key whose name looks like a
+    credential is named as such.
+    """
+    if not isinstance(section, dict):
+        raise ProfileError("%s: 'signed_out' must be a mapping" % where)
+
+    for key in section:
+        if _looks_like_credential(key):
+            raise ProfileError(
+                "%s: 'signed_out' key %r looks like a credential — the section "
+                "describes the sign-in screen, never a login, a password, an SMS "
+                "code or a cookie" % (where, key)
+            )
+
+    unknown = sorted(set(section) - set(_SIGNED_OUT_KEYS))
+    if unknown:
+        raise ProfileError(
+            "%s: 'signed_out' has unknown key(s) %s (allowed: %s)"
+            % (where, ", ".join(unknown), ", ".join(_SIGNED_OUT_KEYS))
+        )
+
+    result = {"url_contains": [], "text": []}
+    for key in _SIGNED_OUT_KEYS:
+        value = section.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ProfileError(
+                "%s: 'signed_out.%s' must be a list of non-empty strings"
+                % (where, key)
+            )
+        cleaned = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ProfileError(
+                    "%s: 'signed_out.%s' must hold non-empty strings, not %r"
+                    % (where, key, item)
+                )
+            cleaned.append(item.strip())
+        result[key] = cleaned
+
+    if not result["url_contains"] and not result["text"]:
+        raise ProfileError(
+            "%s: 'signed_out' needs at least one of 'url_contains' or 'text' — "
+            "an empty section could never recognise the sign-in screen" % where
+        )
+
+    return result
+
+
 def _validate(data, path):
     where = os.path.basename(path)
 
@@ -1078,6 +1162,9 @@ def _validate(data, path):
 
     if "unlock" in data:
         data["unlock"] = _normalise_unlock(data["unlock"], where)
+
+    if "signed_out" in data:
+        data["signed_out"] = _normalise_signed_out(data["signed_out"], where)
 
     return data
 

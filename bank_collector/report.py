@@ -26,7 +26,8 @@ For a paginated run the block looks like:
 
     {
       "scroll": {"mode": "pages", "pages": 59, "clicks": 58, "rows": 590,
-                 "stop": "date", "oldest_date": "2025-12-31", "complete": true}
+                 "stop": "date", "oldest_date": "2025-12-31",
+                 "headerless_rows": 0, "recheck": "same", "complete": true}
     }
 
 An imported statement adds the ``statement`` block (file, rows, period,

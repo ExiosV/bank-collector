@@ -84,8 +84,10 @@ resolved arrow's text must contain no digit (a numbered page button is never
 the arrow). A disabled arrow is the list's definitive end. After a walk that
 ended with ``date`` or ``end`` the record's URL is opened again and the first
 page is re-read: if it changed, an operation arrived mid-run and the pages
-may have shifted, so the run is reported incomplete. The pages are disjoint,
-so their rows are appended as they are, without cross-page dedup.
+may have shifted, so the run is reported incomplete; if it yields no rows at
+all (expired session, login page, failed load) nothing can be proven and the
+run is reported incomplete too. The pages are disjoint, so their rows are
+appended as they are, without cross-page dedup.
 ``pages`` cannot be combined with ``header``: a numbered-page list does not
 carry day headers across page boundaries.
 """
@@ -1611,8 +1613,9 @@ def _paginate_section(
     carrying ``disabled`` (or ``aria-disabled="true"``) ends the history. The
     current page number is read from ``pages.active_selector`` before the
     click and must equal the number of pages read so far; the first page must
-    read 1. The page number must move to the next integer afterwards,
-    together with at least one rendered row.
+    read 1 — an unreadable number is an error too, never an assumption that
+    the list opened where it should. The page number must move to the next
+    integer afterwards, together with at least one rendered row.
 
     The pages are disjoint, so all their rows are kept without cross-page
     dedup: two equal coffees on two pages are two operations. A page whose
@@ -1632,12 +1635,15 @@ def _paginate_section(
     After the walk ends with stop "date" or "end", the record's URL is
     revisited and the first page is re-read to detect history shifts
     (an operation arriving mid-run shifts every page by one). The multiset of
-    row keys is compared with the first page read at the start.
+    row keys is compared with the first page read at the start. A re-read that
+    yields no rows at all (expired session, a login page, a failed load) is
+    not a "changed" page: it is reported as ``"failed"`` and makes the run
+    incomplete, because nothing can be proven about the start of the history.
 
     Returns ``(rows, info)`` where *info* mirrors the scroll block: ``mode``
     (``"pages"``), ``pages`` (how many pages were read), ``clicks``, ``rows``,
     ``stop``, ``oldest_date``, ``headerless_rows`` (always 0 here), ``complete``
-    and ``recheck`` (``"same"``, ``"changed"`` or ``"skipped"``).
+    and ``recheck`` (``"same"``, ``"changed"``, ``"failed"`` or ``"skipped"``).
     """
     next_selector = pages_def["next_selector"]
     active_selector = pages_def["active_selector"]
@@ -1664,12 +1670,16 @@ def _paginate_section(
     signature_row_selector = record_def["row"]
     signature_items_selector = items_def["row"] if items_def else None
 
-    # Check that the first page reads as page 1.
+    # Check that the first page reads as page 1. An unreadable number is not
+    # "probably page 1": a walk that then stops at the date limit or on a
+    # disabled arrow could otherwise look complete without any anchor at all.
     first_number = _active_page_number(page, active_selector)
-    if first_number is not None and first_number != 1:
-        warnings.append(
-            "%s: list did not open on page 1 (active page is %d)" % (section_name, first_number)
-        )
+    if first_number != 1:
+        if first_number is None:
+            message = _active_page_message(page, active_selector)
+        else:
+            message = "list did not open on page 1 (active page is %d)" % first_number
+        warnings.append("%s: %s" % (section_name, message))
         stop = "error"
         info = {
             "mode": "pages",
@@ -1866,7 +1876,19 @@ def _paginate_section(
                 warnings.append("%s: first page recheck failed (%s)" % (section_name, exc))
                 recheck_rows = []
             first_page_keys_at_end = _row_key_counts(recheck_rows)
-            if first_page_keys_at_start != first_page_keys_at_end:
+            if not recheck_rows:
+                # Zero rows after a real navigation is not a smaller first
+                # page: the session expired, the cabinet served its login
+                # page or the load failed. Nothing can be proven about the
+                # start of the history, so the run is incomplete.
+                warnings.append(
+                    "%s: the first page could not be re-read at the end "
+                    "(session expired or page not loaded) — the run cannot be "
+                    "proven complete" % section_name
+                )
+                recheck = "failed"
+                short_page = True  # force complete to False
+            elif first_page_keys_at_start != first_page_keys_at_end:
                 warnings.append(
                     "%s: the first page changed during the run (a new operation arrived?) "
                     "— pages may have shifted, history may be incomplete" % section_name
@@ -2034,11 +2056,14 @@ def collect(page, profile, timeout_ms=DEFAULT_TIMEOUT_MS, now=None):
     feed with no reliable overlap between rounds). A paginated run reports
     ``{"mode": "pages", "pages": P, "clicks": K, "rows": M, "stop": "date"|
     "end"|"limit"|"error", "oldest_date": ..., "headerless_rows": 0,
-    "recheck": "same"|"changed"|"skipped", "complete": bool}``: how many pages
-    were read, how many times the "next page" arrow was pressed, where the walk
-    stopped (``end`` is a disabled arrow — the list's definitive end of history)
-    and whether the re-read first page matched the one read at the start
-    (``recheck``).
+    "recheck": "same"|"changed"|"failed"|"skipped", "complete": bool}``: how many
+    pages were read, how many times the "next page" arrow was pressed, where the
+    walk stopped (``end`` is a disabled arrow — the list's definitive end of
+    history) and whether the re-read first page matched the one read at the
+    start (``recheck``: ``same``; ``changed`` when a non-empty page differs;
+    ``failed`` when it yielded no rows at all — an expired session or a failed
+    load, which also leaves the run incomplete; ``skipped`` when no recheck
+    was possible).
 
     *now* anchors the run's ``fetched_at`` (kept in UTC) and the year and
     relative day ("Сегодня"/"Вчера") inferred by the ``ru_date`` field

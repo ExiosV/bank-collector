@@ -271,6 +271,31 @@ class ShiftingCabinet(PagedPage):
         return PagedPage.goto(self, url, **kwargs)
 
 
+class ExpiringCabinet(PagedPage):
+    """The first page re-read at the end comes back without any operation rows.
+
+    That is what an expired session (a redirect to the login page) or a failed
+    load looks like: the URL opens, the rows do not. It is not a smaller first
+    page and must not be read as "changed" or as "same".
+    """
+
+    LOGIN_PAGE = "<html><body><div class='login'>Сессия истекла</div></body></html>"
+
+    def __init__(self, htmls):
+        PagedPage.__init__(self, htmls)
+        self.history_gotos = 0
+
+    def goto(self, url, **kwargs):
+        if url.rstrip("/") == HISTORY_URL.rstrip("/"):
+            self.history_gotos += 1
+            if self.history_gotos >= 2:
+                self.visited.append(url)
+                self.url = url
+                self._set_root(self.LOGIN_PAGE)
+                return None
+        return PagedPage.goto(self, url, **kwargs)
+
+
 def _read_fixture(name):
     with open(os.path.join(FIXTURES, name), "r", encoding="utf-8") as handle:
         return handle.read()
@@ -479,9 +504,16 @@ def test_a_row_older_than_stop_before_date_stops_the_walk():
 
 
 def test_a_next_selector_matching_two_elements_is_never_clicked():
-    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))], navs=2)])
+    # The active page number is readable, but the next selector names both
+    # arrows (left and right): none of the two is pressed.
+    two_arrows = "nav.pagination button.pagination__item_arrow"
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))])])
 
-    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+    result = collect(
+        page,
+        _profile(page_size=3, stop_before_date=None, next_selector=two_arrows),
+        now=NOW,
+    )
 
     assert page.clicks == [], "not one of the two arrows is pressed"
     assert result["scroll"]["stop"] == "error"
@@ -490,7 +522,7 @@ def test_a_next_selector_matching_two_elements_is_never_clicked():
     assert result["scroll"]["complete"] is False
     assert _warnings(result) == [
         "transactions: next-page selector %r matched 2 elements, none clicked"
-        % NEXT_SELECTOR
+        % two_arrows
     ]
 
 
@@ -602,6 +634,43 @@ def test_a_list_that_does_not_open_on_page_1_is_an_error():
     ]
 
 
+def test_an_unreadable_page_number_with_a_date_stop_is_an_error():
+    """An unreadable number is not "probably page 1": the date stop alone must
+    not make the run complete when the list never proved it opened on page 1."""
+    page = PagedPage([_history(1, [("31 декабря 2025", _ops(2))], actives=0)])
+
+    result = collect(page, _profile(page_size=3), now=NOW)
+
+    assert page.clicks == [], "no anchor, no click"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["pages"] == 1
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: active-page selector %r matched 0 elements, not one page number"
+        % ACTIVE_SELECTOR
+    ]
+
+
+def test_an_unreadable_page_number_before_a_disabled_arrow_is_an_error():
+    """A disabled arrow on the only page would be a complete end; an unreadable
+    number leaves the run without the anchor that makes it trustworthy."""
+    page = PagedPage(
+        [_history(1, [("24 октября, суббота", _ops(3))], last=True, actives=0)]
+    )
+
+    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+
+    assert page.clicks == [], "a disabled arrow is not pressed either way"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["clicks"] == 0
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: active-page selector %r matched 0 elements, not one page number"
+        % ACTIVE_SELECTOR
+    ]
+
+
 def test_a_page_number_that_does_not_match_pages_read_stops_before_the_click():
     page = ScriptedActivePage(
         [
@@ -680,6 +749,27 @@ def test_an_empty_page_after_the_click_is_an_error():
     )
 
 
+def test_a_page_number_that_moves_but_keeps_the_same_rows_is_an_error():
+    """The number says page 2 but the operation rows stayed identical: the list
+    did not switch, so the walk must stop instead of reading the page twice."""
+    same_day = [("24 октября, суббота", _ops(3))]
+    page = PagedPage([_history(1, same_day), _history(2, same_day, last=True)])
+
+    result = collect(
+        page, _profile(page_size=3, wait_ms=1, settle_ms=0, stop_before_date=None), now=NOW
+    )
+
+    assert page.clicked_directions == ["next"], "one click, then the error stops the walk"
+    assert result["scroll"]["stop"] == "error"
+    assert result["scroll"]["pages"] == 1
+    assert result["scroll"]["clicks"] == 1
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "transactions: page 2 content did not change after the click "
+        "(the list did not switch pages)"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Click hardening (item 4)
 # ---------------------------------------------------------------------------
@@ -707,12 +797,16 @@ def test_an_arrow_whose_text_contains_a_digit_is_never_clicked():
 
 
 def test_a_next_selector_matching_no_element_is_never_clicked():
-    html = "<html><body><div class='history'>%s</div></body></html>" % _group(
-        "24 октября, суббота", _ops(3)
-    )
-    page = PagedPage([html])
+    # A readable page number and a list with no arrow at all: the selector
+    # finds nothing, so nothing is clicked.
+    missing = "nav.pagination button.no-such-arrow"
+    page = PagedPage([_history(1, [("24 октября, суббота", _ops(3))])])
 
-    result = collect(page, _profile(page_size=3, stop_before_date=None), now=NOW)
+    result = collect(
+        page,
+        _profile(page_size=3, stop_before_date=None, next_selector=missing),
+        now=NOW,
+    )
 
     assert page.clicks == []
     assert result["scroll"]["stop"] == "error"
@@ -720,7 +814,7 @@ def test_a_next_selector_matching_no_element_is_never_clicked():
     assert result["scroll"]["complete"] is False
     assert _warnings(result) == [
         "transactions: next-page selector %r matched 0 elements, none clicked"
-        % NEXT_SELECTOR
+        % missing
     ]
 
 
@@ -865,6 +959,62 @@ def test_the_recheck_is_skipped_when_the_record_has_no_url():
     assert result["scroll"]["stop"] == "end"
     assert result["scroll"]["recheck"] == "skipped"
     assert result["scroll"]["complete"] is True
+
+
+def test_a_first_page_that_yields_no_rows_at_the_end_is_failed_not_changed():
+    """An expired session (login page) or a failed load gives no rows at all:
+    nothing can be proven, so the run is incomplete and the recheck says so."""
+    page = ExpiringCabinet(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            _history(
+                2,
+                [("23 октября, пятница", [_operation("Кофе", "−250 ₽")] * 3)],
+                last=True,
+            ),
+        ]
+    )
+
+    result = collect(page, _profile(page_size=3), now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "failed"
+    assert result["scroll"]["complete"] is False
+    assert _warnings(result) == [
+        "waited for '.transaction-list__item' but it did not appear "
+        "(selector '.transaction-list__item' not found)",
+        "transactions: the first page could not be re-read at the end "
+        "(session expired or page not loaded) — the run cannot be proven complete",
+    ]
+
+
+def test_a_recheck_navigates_when_the_record_url_is_the_profile_url():
+    """The unlock proxy swallows only its first goto of the open URL; the
+    recheck must really navigate, or it re-reads the last page and always
+    reports a change."""
+    page = PagedPage(
+        [
+            _history(1, [("24 октября, суббота", _ops(3))]),
+            _history(
+                2,
+                [("23 октября, пятница", [_operation("Кофе", "−250 ₽")] * 3)],
+                last=True,
+            ),
+        ]
+    )
+    profile = _profile(page_size=3)
+    profile["url"] = HISTORY_URL
+    profile["transactions"][0]["url"] = HISTORY_URL
+
+    result = collect(cli._AlreadyOpenPage(page, HISTORY_URL), profile, now=NOW)
+
+    assert result["scroll"]["stop"] == "end"
+    assert result["scroll"]["recheck"] == "same", (
+        "the recheck navigated back to the first page; only the first goto "
+        "(the post-unlock reload) was swallowed"
+    )
+    assert result["scroll"]["complete"] is True
+    assert _warnings(result) == []
 
 
 # ---------------------------------------------------------------------------

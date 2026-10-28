@@ -323,24 +323,29 @@ def _without_scroll(profile):
 
 
 class _AlreadyOpenPage(object):
-    """A page proxy whose ``goto`` of the already open URL does nothing.
+    """A page proxy that swallows the first ``goto`` of the already open URL.
 
     ``collect()`` opens the cabinet itself.  After the unlock the cabinet is
-    already there, and a second ``goto`` would reload the page — which would
+    already there, and that first ``goto`` would reload the page — which would
     throw the freshly unlocked session away.  This proxy swallows exactly
-    that one call and passes everything else through.
+    that one call and lets every later ``goto`` through: the first-page
+    recheck of a paginated run (and any record on the profile's own URL) must
+    really navigate, or it would re-read the last page and always report the
+    first page as changed.
     """
 
     def __init__(self, page, url):
         self._page = page
         self._url = url
+        self._swallowed = False
 
     @property
     def url(self):
         return getattr(self._page, "url", self._url)
 
     def goto(self, url, *args, **kwargs):
-        if _same_url(url, self._url):
+        if not self._swallowed and _same_url(url, self._url):
+            self._swallowed = True
             return None
         return self._page.goto(url, *args, **kwargs)
 

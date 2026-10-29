@@ -57,10 +57,10 @@
 # login; a full run takes ~22 minutes of continuous activity. If the session
 # dies mid-run the cabinet redirects the page to /login/main, which matches the
 # `signed_out` marker below: the run then ends with exit code 6, prints exactly
-# the one stdout line `SIGNED_OUT: raif`, writes no files. For a session that
-# dies mid-run, the run ends with an error (exit 5) if the page stops advancing
-# without the redirect matching the marker. An unattended night run will not
-# work — it must run while the owner is logged in.
+# one stdout line `SIGNED_OUT: raif` and writes no files. If the page instead
+# stops advancing without the redirect matching the marker, the run ends with
+# an error (exit 5). An unattended night run will not work — it must run while
+# the owner is logged in.
 #
 # NOTE: Raiffeisen provides no category, no description/MCC, no card or account
 # attribution per operation. The `cashback` field is a separate optional field

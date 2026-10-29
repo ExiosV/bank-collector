@@ -12,14 +12,14 @@ Exit codes
     reach ``stop_before_date`` (or hit ``max_rounds``/``max_pages``), or a
     fuller snapshot on disk was kept and the new report went to
     ``<bank>.partial.json`` — not a success either way
-6   the cabinet showed its sign-in screen: nobody is signed in. The run stops
-    before any record is read (the marker comes from the profile's
-    ``signed_out`` block) and prints one line ``SIGNED_OUT: <bank>``. No
-    report file is written and no existing file is touched (warnings go to
+6   the cabinet showed its sign-in screen: nobody is signed in (the marker
+    comes from the profile's ``signed_out`` block). If the screen shows at
+    the start, the run stops before any record is read; if the session dies
+    mid-run (pages, scroll, recheck or visit), the records already read are
+    discarded. Either way the run prints one line ``SIGNED_OUT: <bank>``,
+    writes no report file and touches no existing file (warnings go to
     stderr). ``--check-session`` reports the same state as ``SESSION:
-    signed-out <bank>``. A session that dies mid-run (pages, scroll, recheck
-    or visit) also ends in exit 6: records already read are discarded, and
-    nothing is written.
+    signed-out <bank>``.
 
 ``--check-session`` opens only the profile's URL — no unlock code, no record
 page, no click and no scroll — waits for its ``wait_for`` selector or a
